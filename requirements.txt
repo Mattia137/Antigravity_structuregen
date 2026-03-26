@@ -1,0 +1,7 @@
+streamlit>=1.30.0
+plotly>=5.18.0
+trimesh>=4.0.0
+networkx>=3.0
+PyNiteFEA>=0.0.86
+google-generativeai>=0.3.2
+numpy>=1.24.0
