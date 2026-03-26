@@ -165,13 +165,39 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* ── Iteration List ── */
 .iteration-list {
-    max-height: 120px; overflow-y: auto;
+    max-height: 220px; overflow-y: auto;
 }
 .iter-item {
     display: flex; justify-content: space-between;
     padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.03);
     font-size: 8px; letter-spacing: 0.1em; opacity: 0.6;
 }
+
+/* ── Run header + variant tabs ── */
+.iter-run-header {
+    font-size: 7px; letter-spacing: 0.3em; opacity: 0.35;
+    text-transform: uppercase; padding: 6px 0 4px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.variant-tabs {
+    display: flex; gap: 4px; padding: 6px 0;
+}
+.variant-tab {
+    flex: 1; padding: 6px 4px;
+    border: 1px solid rgba(255,255,255,0.08);
+    cursor: pointer; font-size: 6px; letter-spacing: 0.1em;
+    text-align: center; opacity: 0.55; transition: all 0.2s;
+    line-height: 1.6;
+}
+.variant-tab:hover { opacity: 0.85; border-color: rgba(255,255,255,0.25); }
+.variant-tab.active {
+    opacity: 1; border-color: rgba(255,255,255,0.6);
+    background: rgba(255,255,255,0.05);
+}
+.variant-tab .vname {
+    font-size: 7px; letter-spacing: 0.2em; display: block; margin-bottom: 2px;
+}
+.variant-tab .vmeta { opacity: 0.6; }
 
 /* ── Chart ── */
 #chart-canvas {

@@ -19,6 +19,100 @@ from src.optimizer import EvolutionaryOptimizer
 app = Flask(__name__, static_folder='static')
 CORS(app)
 
+# Section ladder: ordered lightest → heaviest by cross-sectional area
+# Used to scale sections up/down for optimization variants
+_STEEL_LADDER = [
+    "W8x31", "IPE_300", "HEA_200", "HSS6x0.500",
+    "W12x50", "W12x53", "Tubular_HSS_4x4x1/4",
+    "HSS8x8x0.500", "HSS10x0.500",
+    "W14x90", "W18x97", "W24x146",
+    "W14x159", "HSS12x12x0.625", "HSS16x0.625", "W14x283"
+]
+_LADDER_INDEX = {s: i for i, s in enumerate(_STEEL_LADDER)}
+
+def _scale_graph_sections(graph, steps: int):
+    """
+    Return a new graph with every steel section shifted by `steps` along the
+    weight ladder. Positive = heavier (performance opt), negative = lighter
+    (cost/carbon opt). Non-ladder sections are left unchanged.
+    """
+    import networkx as nx
+    G = graph.copy()
+    for u, v, data in G.edges(data=True):
+        sec = data.get("section", "")
+        if sec in _LADDER_INDEX:
+            new_idx = max(0, min(len(_STEEL_LADDER) - 1,
+                                 _LADDER_INDEX[sec] + steps))
+            G[u][v]["section"] = _STEEL_LADDER[new_idx]
+    return G
+
+
+def _run_fea(graph, material_params):
+    """Build, load, and solve FEA on a graph. Returns results dict."""
+    from src.fea_solver import FEASolver
+    fea = FEASolver(graph, material_params)
+    fea.build_model()
+    fea.apply_loads()
+    return fea.solve_and_evaluate()
+
+
+def _graph_to_response(graph, fea_results, material_params, mat_type):
+    """Convert a NetworkX graph + FEA results to the frontend member/node format."""
+    max_disp = _safe_float(fea_results.get("max_displacement", 0.001) if fea_results else 0.01)
+    node_disps = fea_results.get("node_displacements", {}) if fea_results else {}
+    max_disp_val = max(max_disp, 1e-6)
+
+    nodes_out = {}
+    for node_id, ndata in graph.nodes(data=True):
+        coords = ndata["coords"]
+        nodes_out[str(node_id)] = {"x": coords[0], "y": coords[1], "z": coords[2]}
+
+    members_out = []
+    total_length = 0.0
+    for edge_idx, (u, v, edata) in enumerate(graph.edges(data=True), start=1):
+        p1 = np.array(graph.nodes[u]["coords"])
+        p2 = np.array(graph.nodes[v]["coords"])
+        member_len = float(np.linalg.norm(p1 - p2))
+        total_length += member_len
+
+        disp_i = _safe_float(node_disps.get(str(u), 0.0) / max_disp_val)
+        disp_j = _safe_float(node_disps.get(str(v), 0.0) / max_disp_val)
+
+        members_out.append({
+            "id": f"m_{edge_idx}",
+            "from": str(u),
+            "to": str(v),
+            "role": edata.get("section_type", "secondary_lattice"),
+            "section": edata.get("section", mat_type),
+            "connection": edata.get("connection", "fixed"),
+            "disp_i": round(disp_i, 4),
+            "disp_j": round(disp_j, 4)
+        })
+
+    total_volume = total_length * 0.05  # 0.05 m² average cross-section area
+    total_mass = total_volume * material_params["rho"]
+
+    if mat_type == "Steel":
+        total_carbon = total_mass * 1.22
+        total_cost = (total_mass / 1000) * 2653.0
+    else:
+        total_carbon = total_mass * 0.20
+        total_cost = (total_mass / 1833) * 145.0
+
+    return {
+        "nodes": nodes_out,
+        "members": members_out,
+        "max_disp": _safe_float(max_disp),
+        "metrics": {
+            "Carbon_kgCO2e": _safe_float(round(total_carbon, 0)),
+            "Cost_USD": _safe_float(round(total_cost, 0)),
+            "Volume": _safe_float(round(total_volume, 2)),
+            "Max_Disp": _safe_float(round(max_disp, 4)),
+            "Status": fea_results.get("status", "Unknown") if fea_results else "Unknown"
+        }
+    }
+
+
 @app.route('/')
 def index():
     return send_file('static/index.html')
@@ -40,6 +134,7 @@ def get_config():
 def evaluate():
     """
     Hooks the web frontend directly into the AI Evolutionary Pipeline.
+    Returns 3 optimization variants: cost/carbon, balanced, max performance.
     """
     data = request.json
     mat_type = data.get('material', 'Steel')
@@ -54,25 +149,18 @@ def evaluate():
     }
 
     # STEP 1: Geometry Extraction
-    # ALL mesh vertices → primary structural nodes (exact coordinates preserved).
-    # ALL unique mesh edges → structural members, classified by dihedral angle:
-    #   crease (angle > 5°) → primary_crease
-    #   flat  (angle ≤ 5°) → secondary_lattice
     try:
         ge = GeometryEngine('mass-DEF.obj')
         all_verts = np.array(ge.extract_boundary_nodes())
 
-        # Low threshold so we capture the full polyhedral skeleton
         creases = ge.extract_primary_creases(angle_threshold_degrees=5.0)
         crease_set = set(tuple(sorted(e)) for e in creases["edges"])
 
-        # Every vertex is a primary node — coordinates preserved exactly
         primary_nodes = [
             {"id": i, "x": float(v[0]), "y": float(v[1]), "z": float(v[2])}
             for i, v in enumerate(all_verts)
         ]
 
-        # Every unique mesh edge is a structural member
         primary_edges = []
         for e in ge.mesh.edges_unique:
             u, v_idx = int(e[0]), int(e[1])
@@ -111,81 +199,49 @@ def evaluate():
         }
 
     try:
-        # STEP 2: Generative Optimizer
+        # STEP 2: AI Generative Design (1 iteration — stays within 60s proxy timeout)
         ai = AIDesigner()
         opt = EvolutionaryOptimizer(ai)
+        base_graph, base_results = opt.run_optimization_loop(base_geom, material_params, max_iterations=1)
 
-        # 1 iteration to stay within Hugging Face 60s proxy timeout
-        final_graph, best_results = opt.run_optimization_loop(base_geom, material_params, max_iterations=1)
-
-        if not final_graph or final_graph.number_of_nodes() == 0:
+        if not base_graph or base_graph.number_of_nodes() == 0:
             with open("crash.log", "w") as f:
                 f.write("AI generative loop returned 0 nodes.\n")
             return jsonify({'error': 'AI generative loop failed to produce graph nodes.'}), 500
 
-        max_disp = _safe_float(best_results.get("max_displacement", 0.001) if best_results else 0.01)
-        # Per-node FEA displacements for visualization gradient
-        node_disps = best_results.get("node_displacements", {}) if best_results else {}
+        # STEP 3: Generate 3 variants programmatically
+        # Variant A — Minimum Cost & Carbon: downgrade sections 2 steps
+        graph_cost = _scale_graph_sections(base_graph, steps=-2)
+        results_cost = _run_fea(graph_cost, material_params)
+
+        # Variant B — Balanced (base AI design, no section change)
+        results_balanced = base_results
+
+        # Variant C — Minimum Displacement: upgrade sections 2 steps
+        graph_perf = _scale_graph_sections(base_graph, steps=+2)
+        results_perf = _run_fea(graph_perf, material_params)
 
     except Exception as e:
         with open("crash.log", "w") as f:
             f.write(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-    # STEP 3: Map back to frontend format
-    nodes_out = {}
-    for node_id, ndata in final_graph.nodes(data=True):
-        coords = ndata["coords"]
-        nodes_out[str(node_id)] = {"x": coords[0], "y": coords[1], "z": coords[2]}
+    # STEP 4: Build response for all 3 variants
+    variant_cost    = _graph_to_response(graph_cost,    results_cost,     material_params, mat_type)
+    variant_balanced = _graph_to_response(base_graph,   results_balanced, material_params, mat_type)
+    variant_perf    = _graph_to_response(graph_perf,    results_perf,     material_params, mat_type)
 
-    members_out = []
-    total_length = 0.0
-    edge_idx = 0
-    max_disp_val = max(max_disp, 1e-6)  # avoid division by zero
-
-    for u, v, edata in final_graph.edges(data=True):
-        edge_idx += 1
-        p1 = np.array(final_graph.nodes[u]["coords"])
-        p2 = np.array(final_graph.nodes[v]["coords"])
-        member_len = float(np.linalg.norm(p1 - p2))
-        total_length += member_len
-
-        # Use actual FEA nodal displacements (normalised 0-1 for colour gradient)
-        disp_i = _safe_float(node_disps.get(str(u), 0.0) / max_disp_val)
-        disp_j = _safe_float(node_disps.get(str(v), 0.0) / max_disp_val)
-
-        members_out.append({
-            "id": f"m_{edge_idx}",
-            "from": str(u),
-            "to": str(v),
-            "role": edata.get("section_type", "secondary_lattice"),
-            "section": edata.get("section", mat_type),
-            "connection": edata.get("connection", "fixed"),
-            "disp_i": round(disp_i, 4),
-            "disp_j": round(disp_j, 4)
-        })
-
-    # Sustainability metrics — use actual cross-section area from edge data
-    total_volume = total_length * 0.05   # fallback: 0.05 m² average area
-    total_mass = total_volume * material_params["rho"]
-
-    if mat_type == "Steel":
-        total_carbon = total_mass * 1.22
-        total_cost = (total_mass / 1000) * 2653.0
-    else:
-        total_carbon = total_mass * 0.20
-        total_cost = (total_mass / 1833) * 145.0
+    variant_cost["name"]     = "MIN_COST"
+    variant_balanced["name"] = "BALANCED"
+    variant_perf["name"]     = "MIN_DISP"
 
     return jsonify({
-        'metrics': {
-            'Carbon_kgCO2e': _safe_float(round(total_carbon, 0)),
-            'Cost_USD': _safe_float(round(total_cost, 0)),
-            'Volume': _safe_float(round(total_volume, 2)),
-            'Max_Disp': _safe_float(round(max_disp, 4))
-        },
-        'nodes': nodes_out,
-        'members': members_out,
-        'max_disp': _safe_float(max_disp),
+        'variants': [variant_cost, variant_balanced, variant_perf],
+        # Legacy flat fields — mirrors balanced variant for backwards compat
+        'nodes':   variant_balanced['nodes'],
+        'members': variant_balanced['members'],
+        'metrics': variant_balanced['metrics'],
+        'max_disp': variant_balanced['max_disp'],
         'unit': 'm'
     })
 

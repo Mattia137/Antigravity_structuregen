@@ -5,7 +5,12 @@ from google import genai
 from google.genai import types
 
 # Available cross-section names (must match config.py SECTIONS keys)
-STEEL_SECTIONS = ["W14x283", "W14x90", "W12x50", "IPE_300", "HEA_200", "Tubular_HSS_4x4x1/4"]
+STEEL_SECTIONS = [
+    "W8x31", "W12x50", "W12x53", "W14x90", "W14x159", "W14x283",
+    "W18x97", "W24x146", "IPE_300", "HEA_200",
+    "HSS6x0.500", "HSS10x0.500", "HSS16x0.625",
+    "Tubular_HSS_4x4x1/4", "HSS8x8x0.500", "HSS12x12x0.625"
+]
 CONCRETE_SECTIONS = ["Rect_16x16", "Circ_16", "Floor_Tie", "Core_Massive"]
 
 class AIDesigner:
@@ -75,11 +80,16 @@ TASK 2 — ADD SECONDARY STRUCTURE (add only what is structurally necessary):
 TASK 3 — ASSIGN CROSS-SECTIONS (every edge must have a "section"):
   Choose from this list only: {section_list}
 
-  Assignment rules:
-  - Primary creases carrying gravity loads (vertical/near-vertical): W14x90 or W14x283 for heavy columns
-  - Primary creases spanning horizontally (beams, arches): W12x50 or IPE_300
-  - Secondary lattice / bracing members: HEA_200 or Tubular_HSS_4x4x1/4
-  - Assign heavier sections where members are long or carry high load paths.
+  Assignment rules (IBC 2024 / AISC 360-22):
+  - Vertical/near-vertical primary columns (tall or high axial): W14x283 or W14x159
+  - Medium columns or raking members: W14x90 or W18x97
+  - Long horizontal beams (span > 9m): W24x146 or W18x97
+  - Medium beams (span 5-9m): W12x53 or W12x50
+  - Short beams / ties (span < 5m): W8x31 or IPE_300
+  - Large perimeter diagonal braces: HSS16x0.625 or HSS12x12x0.625
+  - Medium diagonal braces: HSS10x0.500 or HSS8x8x0.500
+  - Light secondary lattice / bracing: HEA_200, HSS6x0.500, or Tubular_HSS_4x4x1/4
+  - Assign heavier sections at high-connectivity nodes (degree >= 4) and long spans.
 
 TASK 4 — ASSIGN CONNECTION TYPES (every edge must have a "connection"):
   - "fixed": moment-resisting connection — use for beams, continuous columns, moment frames

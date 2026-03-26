@@ -80,16 +80,21 @@ class FEASolver:
         }
 
         # Add nodes
-        min_z = float('inf')
+        # Blender OBJ exports Y-up: Y = height (vertical), Z = depth
+        min_y = float('inf')
         for node_id, data in self.graph.nodes(data=True):
             coords = data["coords"]
             self.model.add_node(str(node_id), coords[0], coords[1], coords[2])
-            if coords[2] < min_z:
-                min_z = coords[2]
+            if coords[1] < min_y:
+                min_y = coords[1]
 
-        # Fixed supports at the lowest Z level (foundation)
+        # Fixed supports at the lowest Y level (foundation / ground floor)
+        # Use a 10% of total height tolerance to catch all ground nodes
+        y_vals = [data["coords"][1] for _, data in self.graph.nodes(data=True)]
+        y_range = max(y_vals) - min_y if y_vals else 1.0
+        tol = max(0.5, y_range * 0.05)
         for node_id, data in self.graph.nodes(data=True):
-            if abs(data["coords"][2] - min_z) < 0.1:
+            if abs(data["coords"][1] - min_y) < tol:
                 self.model.def_support(str(node_id), True, True, True, True, True, True)
 
         # Add members
@@ -121,19 +126,24 @@ class FEASolver:
 
         rho_n = self.material.get("rho", 7850) * gravity  # N/m³
 
+        # Find min Y for seismic base shear height calculation
+        min_y_val = min((n.Y for n in self.model.nodes.values()), default=0.0)
+
         for member_name, member in self.model.members.items():
             area = member.section.A  # m²
             dist_load = rho_n * area  # N/m (weight per unit length)
             try:
-                self.model.add_member_dist_load(member_name, 'FZ', -dist_load, -dist_load, 0, 100, case='D')
+                # FY = vertical axis in Blender Y-up OBJ coordinate system
+                self.model.add_member_dist_load(member_name, 'FY', -dist_load, -dist_load, 0, 100, case='D')
             except Exception:
                 pass
 
         for node_id, node in self.model.nodes.items():
-            if node.Z > 1.0:
-                lateral_force = 500 * node.Z  # ELF approximation
+            height_above_base = node.Y - min_y_val
+            if height_above_base > 1.0:
+                lateral_force = 500 * height_above_base  # ELF approximation
                 self.model.add_node_load(node_id, 'FX', lateral_force, case='E')
-                self.model.add_node_load(node_id, 'FZ', -2000, case='L')
+                self.model.add_node_load(node_id, 'FY', -2000, case='L')
 
     # ------------------------------------------------------------------
     def solve_and_evaluate(self):
