@@ -1,6 +1,5 @@
 import math
 import networkx as nx
-import numpy as np
 from Pynite import FEModel3D
 
 # Unit conversions: config.py stores sections in imperial (in², in⁴)
