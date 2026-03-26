@@ -24,7 +24,10 @@ def serve_mesh(filename):
 @app.route('/api/config')
 def get_config():
     return jsonify({
-        'materials': ['Steel', 'Concrete'],
+        'materials': {
+            'Steel': {'E': 29000, 'nu': 0.3, 'rho': 0.283, 'Strength': 50},
+            'Concrete': {'E': 4000, 'nu': 0.2, 'rho': 0.086, 'Strength': 5}
+        }
     })
 
 @app.route('/api/evaluate', methods=['POST'])
