@@ -64,8 +64,8 @@ def evaluate():
     ai = AIDesigner()
     opt = EvolutionaryOptimizer(ai)
     
-    # We run 2 max iterations to cap latency on a web request
-    final_graph, best_results = opt.run_optimization_loop(base_geom, material_params, max_iterations=2)
+    # We run 1 max iteration to prevent Hugging Face's 60-second proxy timeout latency
+    final_graph, best_results = opt.run_optimization_loop(base_geom, material_params, max_iterations=1)
     
     if not final_graph or final_graph.number_of_nodes() == 0:
         return jsonify({'error': 'AI generative loop failed to produce graph nodes.'}), 500
