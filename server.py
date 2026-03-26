@@ -53,36 +53,31 @@ def evaluate():
         "Fy": 350e6 if mat_type == 'Steel' else 40e6
     }
 
-    # STEP 1: Geometry Extraction — use mesh creases as primary structural skeleton
+    # STEP 1: Geometry Extraction
+    # ALL mesh vertices → primary structural nodes (exact coordinates preserved).
+    # ALL unique mesh edges → structural members, classified by dihedral angle:
+    #   crease (angle > 5°) → primary_crease
+    #   flat  (angle ≤ 5°) → secondary_lattice
     try:
         ge = GeometryEngine('mass-DEF.obj')
         all_verts = np.array(ge.extract_boundary_nodes())
 
-        creases = ge.extract_primary_creases()
-        crease_node_indices = np.array(creases["nodes"], dtype=int)
-        crease_edges_raw = creases["edges"]
+        # Low threshold so we capture the full polyhedral skeleton
+        creases = ge.extract_primary_creases(angle_threshold_degrees=5.0)
+        crease_set = set(tuple(sorted(e)) for e in creases["edges"])
 
-        if len(crease_node_indices) >= 2:
-            # Map original vertex indices → sequential node IDs
-            crease_coords = all_verts[crease_node_indices]
-            idx_map = {int(orig): new_id for new_id, orig in enumerate(crease_node_indices)}
+        # Every vertex is a primary node — coordinates preserved exactly
+        primary_nodes = [
+            {"id": i, "x": float(v[0]), "y": float(v[1]), "z": float(v[2])}
+            for i, v in enumerate(all_verts)
+        ]
 
-            primary_nodes = [
-                {"id": new_id, "x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
-                for new_id, c in enumerate(crease_coords)
-            ]
-            primary_edges = [
-                {"source": idx_map[int(e[0])], "target": idx_map[int(e[1])]}
-                for e in crease_edges_raw
-                if int(e[0]) in idx_map and int(e[1]) in idx_map
-            ]
-        else:
-            # No creases detected — fall back to all boundary vertices
-            primary_nodes = [
-                {"id": i, "x": float(v[0]), "y": float(v[1]), "z": float(v[2])}
-                for i, v in enumerate(all_verts)
-            ]
-            primary_edges = []
+        # Every unique mesh edge is a structural member
+        primary_edges = []
+        for e in ge.mesh.edges_unique:
+            u, v_idx = int(e[0]), int(e[1])
+            etype = "primary_crease" if tuple(sorted([u, v_idx])) in crease_set else "secondary_lattice"
+            primary_edges.append({"source": u, "target": v_idx, "type": etype})
 
         base_geom = {
             "primary_nodes": primary_nodes,
@@ -94,7 +89,9 @@ def evaluate():
                 "z_min": float(all_verts[:, 2].min()), "z_max": float(all_verts[:, 2].max()),
             }
         }
-        print(f"Primary structure: {len(primary_nodes)} nodes, {len(primary_edges)} edges from mesh creases")
+        print(f"Primary structure: {len(primary_nodes)} nodes, {len(primary_edges)} edges "
+              f"({sum(1 for e in primary_edges if e['type']=='primary_crease')} crease, "
+              f"{sum(1 for e in primary_edges if e['type']=='secondary_lattice')} secondary)")
 
     except Exception as e:
         with open("crash.log", "w") as f:

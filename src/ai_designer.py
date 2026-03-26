@@ -127,8 +127,8 @@ OUTPUT: Return ONLY this JSON (no markdown, no extra text):
     def _geometric_fallback(self, geometry_data: dict) -> dict:
         """
         Fallback when Gemini is unavailable.
-        Uses the actual mesh crease nodes and edges as primary structure,
-        then adds minimal secondary members (floor centroid stabilisers).
+        Assigns sections to every primary edge. Adds centroid stabilisers only
+        when the primary structure is sparse (< 20 nodes).
         """
         import numpy as _np
 
@@ -146,46 +146,42 @@ OUTPUT: Return ONLY this JSON (no markdown, no extra text):
         if len(primary_nodes) < 2:
             return self._generic_cube_fallback()
 
-        # Start with all primary nodes
         nodes = [{"id": n["id"], "x": n["x"], "y": n["y"], "z": n["z"]} for n in primary_nodes]
 
-        # Primary edges with default steel sections
-        edges = [
-            {"source": e["source"], "target": e["target"],
-             "type": "primary_crease", "section": "IPE_300", "connection": "fixed"}
-            for e in primary_edges
-        ]
+        # Assign sections based on edge type
+        edges = []
+        for e in primary_edges:
+            etype = e.get("type", "secondary_lattice")
+            section = "IPE_300" if etype == "primary_crease" else "HEA_200"
+            edges.append({
+                "source": e["source"], "target": e["target"],
+                "type": etype, "section": section, "connection": "fixed"
+            })
 
-        nid = max(n["id"] for n in nodes) + 1
-
-        # Group nodes by floor Z level (±0.5 m tolerance) and add centroid stabilisers
         arr = _np.array([[n["x"], n["y"], n["z"]] for n in nodes])
-        z_vals = _np.round(arr[:, 2], 1)
-        unique_z = _np.unique(z_vals)
 
-        for z_level in unique_z:
-            floor_mask = _np.abs(arr[:, 2] - z_level) < 0.5
-            floor_indices = _np.where(floor_mask)[0]
-            floor_ids = [nodes[i]["id"] for i in floor_indices]
+        # Only add centroid stabilisers when the primary structure is sparse
+        if len(nodes) < 20:
+            nid = max(n["id"] for n in nodes) + 1
+            z_vals = _np.round(arr[:, 2], 1)
+            for z_level in _np.unique(z_vals):
+                floor_mask = _np.abs(arr[:, 2] - z_level) < 0.5
+                floor_indices = _np.where(floor_mask)[0]
+                floor_ids = [nodes[i]["id"] for i in floor_indices]
+                if len(floor_ids) < 3:
+                    continue
+                cx = float(arr[floor_mask, 0].mean())
+                cy = float(arr[floor_mask, 1].mean())
+                nodes.append({"id": nid, "x": cx, "y": cy, "z": float(z_level)})
+                for fid in floor_ids:
+                    edges.append({
+                        "source": fid, "target": nid,
+                        "type": "secondary_lattice", "section": "HEA_200", "connection": "fixed"
+                    })
+                nid += 1
 
-            if len(floor_ids) < 3:
-                continue
-
-            cx = float(arr[floor_mask, 0].mean())
-            cy = float(arr[floor_mask, 1].mean())
-
-            nodes.append({"id": nid, "x": cx, "y": cy, "z": float(z_level)})
-            for fid in floor_ids:
-                edges.append({
-                    "source": fid, "target": nid,
-                    "type": "secondary_lattice", "section": "HEA_200", "connection": "pinned"
-                })
-            nid += 1
-
-        # Shear core at plan centroid
         cores = [{"x": float(arr[:, 0].mean()), "y": float(arr[:, 1].mean()), "thickness": 0.3}]
-
-        print(f"Crease-based fallback: {len(nodes)} nodes, {len(edges)} edges")
+        print(f"Fallback: {len(nodes)} nodes, {len(edges)} edges")
         return {"nodes": nodes, "edges": edges, "cores": cores}
 
     def _generic_cube_fallback(self) -> dict:
