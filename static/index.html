@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ANTIGRAVITY_ANALYSIS</title>
+    <link href="https://fonts.googleapis.com/css2?family=Fragment+Mono:ital@0;1&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- ── THREE.JS VIEWPORT (full screen background) ── -->
+    <canvas id="viewport"></canvas>
+
+    <!-- ── LEFT PANEL ── -->
+    <div id="panel-left" class="panel">
+        <div class="panel-header">GLOBAL PARAMETER BLOCK</div>
+
+        <div class="section-label">MESH IMPORT</div>
+        <label class="upload-zone" id="upload-zone">
+            <input type="file" id="mesh-upload" accept=".obj,.stl" hidden>
+            <span id="upload-text">DRAG .OBJ / .STL OR CLICK</span>
+        </label>
+
+        <div class="section-label">UNIT SYSTEM</div>
+        <div class="param-row">
+            <span class="param-label">UNITS</span>
+            <select id="unit-system">
+                <option value="m" selected>METERS</option>
+                <option value="ft">FEET</option>
+            </select>
+        </div>
+
+        <div class="section-label">GEOMETRY</div>
+        <div class="param-row">
+            <span class="param-label" id="lbl-floor-height">FLOOR_HEIGHT (M)</span>
+            <input type="number" id="floor-height" value="3.66" step="0.1">
+        </div>
+        <div class="param-row">
+            <span class="param-label">NUM_FLOORS</span>
+            <input type="range" id="num-floors" min="1" max="25" value="6">
+            <span class="param-val" id="num-floors-val">6</span>
+        </div>
+
+        <div class="section-label">MATERIAL</div>
+        <div class="param-row">
+            <span class="param-label">PRESET</span>
+            <select id="material-preset">
+                <option value="Steel">STEEL</option>
+                <option value="Concrete">CONCRETE</option>
+                <option value="Wood">WOOD</option>
+            </select>
+        </div>
+        <div class="param-row">
+            <span class="param-label">E_MODULUS (KSI)</span>
+            <input type="number" id="mat-E" value="29000" step="100">
+        </div>
+        <div class="param-row">
+            <span class="param-label">POISSON</span>
+            <input type="number" id="mat-nu" value="0.3" step="0.01">
+        </div>
+        <div class="param-row">
+            <span class="param-label">DENSITY (LB/IN³)</span>
+            <input type="number" id="mat-rho" value="0.283" step="0.001">
+        </div>
+        <div class="param-row">
+            <span class="param-label">STRENGTH (KSI)</span>
+            <input type="number" id="mat-str" value="50" step="1">
+        </div>
+
+        <div class="section-label">SEISMIC (LABC / ASCE 7-22)</div>
+        <div class="param-row">
+            <span class="param-label">S_DS (G)</span>
+            <input type="number" id="s-ds" value="1.8" step="0.1">
+        </div>
+
+        <button class="btn-primary" id="btn-evaluate">EVALUATE _ DESIGN</button>
+        <button class="btn-ghost" id="btn-clear">CLEAR _ MEMORY</button>
+    </div>
+
+    <!-- ── RIGHT PANEL ── -->
+    <div id="panel-right" class="panel">
+        <div class="panel-header">ANALYSIS OUTPUT</div>
+
+        <div class="section-label">CURRENT METRICS</div>
+        <div class="metric-grid" id="metrics-grid">
+            <div class="metric-box">
+                <div class="metric-label">CARBON (KGCO2E)</div>
+                <div class="metric-value" id="m-carbon">—</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-label">COST (USD)</div>
+                <div class="metric-value" id="m-cost">—</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-label" id="lbl-volume">VOLUME (M³)</div>
+                <div class="metric-value" id="m-volume">—</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-label" id="lbl-drift">MAX DRIFT (M)</div>
+                <div class="metric-value" id="m-drift">—</div>
+            </div>
+        </div>
+
+        <div class="section-label">DISPLAY</div>
+        <div class="toggle-row">
+            <label class="toggle"><input type="checkbox" id="show-mesh" checked><span>VOLUME MESH</span></label>
+        </div>
+        <div class="toggle-row">
+            <label class="toggle"><input type="checkbox" id="show-structure" checked><span>STRUCTURE</span></label>
+        </div>
+        <div class="toggle-row">
+            <label class="toggle"><input type="checkbox" id="show-gradient" checked><span>DISPLACEMENT GRADIENT</span></label>
+        </div>
+
+        <div class="section-label">ITERATIONS</div>
+        <div id="iteration-list" class="iteration-list"></div>
+
+        <div class="section-label">COMPARATIVE</div>
+        <canvas id="chart-canvas" width="260" height="180"></canvas>
+    </div>
+
+    <!-- ── TOP CENTER HUD ── -->
+    <div id="hud-top">
+        <div class="hud-sub">SCI-ARC / DS 2GBX</div>
+        <div class="hud-title">ANTIGRAVITY _ ANALYSIS</div>
+        <div class="hud-sub">LABC / ASCE 7-22 / LEED SUSTAINABILITY</div>
+    </div>
+
+    <!-- ── BOTTOM CENTER HUD ── -->
+    <div id="hud-bottom">
+        <span id="hud-status">READY</span>
+    </div>
+
+    <!-- ── SCRIPTS ── -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module" src="/static/app.js"></script>
+</body>
+</html>
