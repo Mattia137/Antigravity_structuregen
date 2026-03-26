@@ -1,7 +1,7 @@
 import math
 import networkx as nx
 import numpy as np
-from PyNite import FEModel3D
+from Pynite import FEModel3D
 
 class FEASolver:
     def __init__(self, structural_graph: nx.Graph, material_params: dict):
