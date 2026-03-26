@@ -124,6 +124,7 @@ class FEASolver:
                     self.model.def_support(nid, True, True, True, True, True, True)
             
             # Add members for the core
+            self._ensure_section("Core_Massive", mat_type)
             for j in range(len(core_node_ids) - 1):
                 mid = f"core_mem_{i}_{j}"
                 self.model.add_member(mid, core_node_ids[j], core_node_ids[j+1], mat_name, "Core_Massive")
