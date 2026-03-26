@@ -18,8 +18,8 @@ class AIDesigner:
         """
         Connect to the external Gemini API using the GEMINI_AGENT_01 environment variable.
         """
-        api_key = os.environ.get("GEMINI_AGENT_01", "DUMMY_KEY_FOR_TESTING")
-        self.client = genai.Client(api_key=api_key)
+        self.api_key = os.getenv("GEMINI_AGENT_02") or os.getenv("GEMINI_AGENT_01") or os.getenv("GOOGLE_API_KEY") or "DUMMY_KEY_FOR_TESTING"
+        self.client = genai.Client(api_key=self.api_key)
         self.model_name = 'gemini-1.5-flash'
 
         try:
