@@ -131,26 +131,31 @@ def get_config():
         }
     })
 
+LATEST_VARIANTS = []
+
 @app.route('/api/evaluate', methods=['POST'])
 def evaluate():
     """
     Hooks the web frontend directly into the AI Evolutionary Pipeline.
     Returns 3 optimization variants: cost/carbon, balanced, max performance.
     """
-    data = request.json
-    mat_type = data.get('material', 'Steel')
-
-    material_params = {
-        "type": mat_type,
-        "E": 200e9 if mat_type == 'Steel' else 30e9,
-        "nu": 0.3 if mat_type == 'Steel' else 0.2,
-        "rho": 7850.0 if mat_type == 'Steel' else 2400.0,
-        "G": 77e9 if mat_type == 'Steel' else 12e9,
-        "Fy": 350e6 if mat_type == 'Steel' else 40e6
-    }
-
-    # STEP 1: Geometry Extraction
     try:
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+
+        mat_type = data.get('material', 'Steel')
+
+        material_params = {
+            "type": mat_type,
+            "E": 200e9 if mat_type == 'Steel' else 30e9,
+            "nu": 0.3 if mat_type == 'Steel' else 0.2,
+            "rho": 7850.0 if mat_type == 'Steel' else 2400.0,
+            "G": 77e9 if mat_type == 'Steel' else 12e9,
+            "Fy": 350e6 if mat_type == 'Steel' else 40e6
+        }
+
+        # STEP 1: Geometry Extraction
         ge = GeometryEngine('mass-DEF.obj')
         all_verts = np.array(ge.extract_boundary_nodes())
 
@@ -188,24 +193,6 @@ def evaluate():
         }
         print(f"Primary structure: {len(primary_nodes)} nodes, {len(primary_edges)} edges. Internal: {len(internal_nodes)} nodes.")
 
-    except Exception as e:
-        with open("crash.log", "w") as f:
-            f.write(traceback.format_exc())
-        print(f"Geometry Extraction error: {e}")
-        base_geom = {
-            "primary_nodes": [
-                {"id": 0, "x": 0, "y": 0, "z": 0}, {"id": 1, "x": 10, "y": 0, "z": 0},
-                {"id": 2, "x": 10, "y": 10, "z": 0}, {"id": 3, "x": 0, "y": 10, "z": 0},
-                {"id": 4, "x": 0, "y": 0, "z": 10}, {"id": 5, "x": 10, "y": 0, "z": 10},
-                {"id": 6, "x": 10, "y": 10, "z": 10}, {"id": 7, "x": 0, "y": 10, "z": 10},
-            ],
-            "primary_edges": [
-                {"source": 0, "target": 4}, {"source": 1, "target": 5},
-                {"source": 2, "target": 6}, {"source": 3, "target": 7},
-            ]
-        }
-
-    try:
         # STEP 2: AI Generative Design (Request 3 Variants directly)
         ai = AIDesigner()
         variants_json = ai.request_variants(base_geom)
@@ -220,40 +207,55 @@ def evaluate():
                 "goal": design.get("optimization_goal", "BALANCED")
             })
 
+        # STEP 3: Build response for all 3 variants
+        output_variants = []
+        for v in variant_results:
+            resp = _graph_to_response(v["graph"], v["fea"], material_params, mat_type)
+            resp["name"] = v["goal"]
+            output_variants.append(resp)
+
+        # Use BALANCED as the default selection for backward compatibility
+        balanced_idx = next((i for i, v in enumerate(output_variants) if v["name"] == "BALANCED"), 0)
+        primary_variant = output_variants[balanced_idx]
+
+        LATEST_VARIANTS.clear()
+        LATEST_VARIANTS.extend(output_variants)
+        
+        # Store the actual graph objects for solid mesh generation later
+        # We'll attach them to the output_variants for easy access
+        for idx, v in enumerate(variant_results):
+            output_variants[idx]["_graph"] = v["graph"]
+
+        return jsonify({
+            'variants': output_variants,
+            'nodes':   primary_variant['nodes'],
+            'members': primary_variant['members'],
+            'metrics': primary_variant['metrics'],
+            'max_disp': primary_variant['max_disp'],
+            'unit': 'm'
+        })
+
     except Exception as e:
-        import traceback
         error_msg = traceback.format_exc()
         with open("crash.log", "w") as f:
             f.write(error_msg)
-        return jsonify({'error': str(e), 'traceback': error_msg}), 500
+        print(f"Error in evaluate: {e}")
+        # Fallback for geometry extraction errors or other issues
+        fallback_geom = {
+            "primary_nodes": [
+                {"id": 0, "x": 0, "y": 0, "z": 0}, {"id": 1, "x": 10, "y": 0, "z": 0},
+                {"id": 2, "x": 10, "y": 10, "z": 0}, {"id": 3, "x": 0, "y": 10, "z": 0},
+                {"id": 4, "x": 0, "y": 0, "z": 10}, {"id": 5, "x": 10, "y": 0, "z": 10},
+                {"id": 6, "x": 10, "y": 10, "z": 10}, {"id": 7, "x": 0, "y": 10, "z": 10},
+            ],
+            "primary_edges": [
+                {"source": 0, "target": 4}, {"source": 1, "target": 5},
+                {"source": 2, "target": 6}, {"source": 3, "target": 7},
+            ]
+        }
+        # Return a simplified error response or a default structure
+        return jsonify({'error': str(e), 'traceback': error_msg, 'fallback_geom': fallback_geom}), 500
 
-    # STEP 3: Build response for all 3 variants
-    output_variants = []
-    for v in variant_results:
-        resp = _graph_to_response(v["graph"], v["fea"], material_params, mat_type)
-        resp["name"] = v["goal"]
-        output_variants.append(resp)
-
-    # Use BALANCED as the default selection for backward compatibility
-    balanced_idx = next((i for i, v in enumerate(output_variants) if v["name"] == "BALANCED"), 0)
-    primary_variant = output_variants[balanced_idx]
-
-    LATEST_VARIANTS.clear()
-    LATEST_VARIANTS.extend(output_variants)
-    
-    # Store the actual graph objects for solid mesh generation later
-    # We'll attach them to the output_variants for easy access
-    for idx, v in enumerate(variant_results):
-        output_variants[idx]["_graph"] = v["graph"]
-
-    return jsonify({
-        'variants': output_variants,
-        'nodes':   primary_variant['nodes'],
-        'members': primary_variant['members'],
-        'metrics': primary_variant['metrics'],
-        'max_disp': primary_variant['max_disp'],
-        'unit': 'm'
-    })
 
 @app.route('/api/solid_mesh/<int:variant_idx>', methods=['GET'])
 def get_solid_mesh(variant_idx):
@@ -267,11 +269,12 @@ def get_solid_mesh(variant_idx):
     
     from src.geometry_engine import GeometryEngine
     # We need a temp mesh path or just dummy for ge
-    ge = GeometryEngine("temp_mesh_mass-DEF.obj") 
+    ge = GeometryEngine("mass-DEF.obj") 
     solid_mesh = ge.generate_solid_structure(graph)
     
     if solid_mesh:
         import io
+        import trimesh
         obj_data = trimesh.exchange.obj.export_obj(solid_mesh)
         return obj_data, 200, {'Content-Type': 'text/plain'}
     else:
