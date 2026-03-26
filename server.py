@@ -168,7 +168,10 @@ def evaluate():
             etype = "primary_crease" if tuple(sorted([u, v_idx])) in crease_set else "secondary_lattice"
             primary_edges.append({"source": u, "target": v_idx, "type": etype})
 
-        internal_nodes = ge.sample_internal_nodes(grid_spacing=8.0) # meter spacing
+        internal_nodes = ge.sample_internal_nodes(grid_spacing=12.0) # increased spacing for safety
+        if len(internal_nodes) > 100:
+            internal_nodes = internal_nodes[:100]
+        
         peak_points = ge.get_max_height_points()
 
         base_geom = {
@@ -218,9 +221,11 @@ def evaluate():
             })
 
     except Exception as e:
+        import traceback
+        error_msg = traceback.format_exc()
         with open("crash.log", "w") as f:
-            f.write(traceback.format_exc())
-        return jsonify({'error': str(e)}), 500
+            f.write(error_msg)
+        return jsonify({'error': str(e), 'traceback': error_msg}), 500
 
     # STEP 3: Build response for all 3 variants
     output_variants = []
