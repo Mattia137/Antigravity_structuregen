@@ -103,18 +103,9 @@ class FEASolver:
 
             self._ensure_section(section_name, mat_type)
             self.model.add_member(member_name, str(u), str(v), mat_name, section_name)
-
-            # Apply end releases for pinned connections (truss behaviour)
-            connection = edata.get("connection", "fixed")
-            if connection == "pinned":
-                try:
-                    self.model.def_releases(
-                        member_name,
-                        Dxi=False, Dyi=False, Dzi=False, Rxi=False, Ryi=True, Rzi=True,
-                        Dxj=False, Dyj=False, Dzj=False, Rxj=False, Ryj=True, Rzj=True
-                    )
-                except Exception:
-                    pass  # Older PyNite versions may not support all kwargs
+            # Note: pinned releases are stored on edges for display/export but not applied
+            # to the FEA model — applying them to all secondary members causes singular
+            # stiffness matrices when interior nodes have only pinned members meeting at them.
 
     # ------------------------------------------------------------------
     def apply_loads(self, gravity=9.81):

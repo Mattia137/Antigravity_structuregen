@@ -1,7 +1,8 @@
 import os
 import json
 import networkx as nx
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # Available cross-section names (must match config.py SECTIONS keys)
 STEEL_SECTIONS = ["W14x283", "W14x90", "W12x50", "IPE_300", "HEA_200", "Tubular_HSS_4x4x1/4"]
@@ -13,8 +14,8 @@ class AIDesigner:
         Connect to the external Gemini API using the GEMINI_AGENT_01 environment variable.
         """
         api_key = os.environ.get("GEMINI_AGENT_01", "DUMMY_KEY_FOR_TESTING")
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = 'gemini-1.5-flash'
 
         try:
             with open(manual_path, "r", encoding="utf-8") as f:
@@ -105,9 +106,10 @@ OUTPUT: Return ONLY this JSON (no markdown, no extra text):
         )
 
         try:
-            response = self.model.generate_content(
-                contents=[{"role": "user", "parts": [{"text": system_prompt + "\n\n" + user_message}]}],
-                generation_config=genai.GenerationConfig(response_mime_type="application/json")
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=system_prompt + "\n\n" + user_message,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
             )
             result = json.loads(response.text)
             # Validate that primary nodes are present in the output
