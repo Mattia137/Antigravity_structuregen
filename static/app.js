@@ -38,8 +38,10 @@ scene.add(grid);
 // ═══════════════════════════════════════════
 const meshGroup = new THREE.Group();
 const structureGroup = new THREE.Group();
+const solidGroup = new THREE.Group();
 scene.add(meshGroup);
 scene.add(structureGroup);
+scene.add(solidGroup);
 
 // ═══════════════════════════════════════════
 // OBJ MESH LOADER
@@ -146,11 +148,43 @@ function renderStructure(data, useGradient) {
     const nodePositions = [];
     Object.values(nodes).forEach(n => {
         nodePositions.push(n.x, n.y, n.z);
+        
+        // --- CONNECTION TYPOLOGY VISUALIZATION ---
+        // Find typology of connected members to this node
+        const connectedMembers = members.filter(m => m.from === n.id || m.to === n.id);
+        const typologies = new Set(connectedMembers.map(m => m.typology));
+        
+        let color = 0x888888; // Default
+        let size = 1.0;
+        if (typologies.has('welded')) { color = 0xff3344; size = 2.0; }
+        else if (typologies.has('hinge')) { color = 0x33ff66; size = 1.5; }
+        else if (typologies.has('steel_plate')) { color = 0xaaaaaa; size = 1.2; }
+
+        const sphereGeo = new THREE.SphereGeometry(size, 8, 8);
+        const sphereMat = new THREE.MeshPhongMaterial({ color, emissive: color, emissiveIntensity: 0.2 });
+        const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+        sphere.position.set(n.x, n.y, n.z);
+        structureGroup.add(sphere);
     });
-    const nodeGeo = new THREE.BufferGeometry();
-    nodeGeo.setAttribute('position', new THREE.Float32BufferAttribute(nodePositions, 3));
-    const nodeMat = new THREE.PointsMaterial({ color: 0xffffff, size: 2, transparent: true, opacity: 0.3 });
-    structureGroup.add(new THREE.Points(nodeGeo, nodeMat));
+}
+
+function loadSolidMesh(variantIdx) {
+    while (solidGroup.children.length) solidGroup.remove(solidGroup.children[0]);
+    if (!document.getElementById('show-solid').checked) return;
+
+    const loader = new OBJLoader();
+    loader.load(`/api/solid_mesh/${variantIdx}`, (obj) => {
+        obj.traverse((child) => {
+            if (child.isMesh) {
+                child.material = new THREE.MeshPhongMaterial({
+                    color: 0xcccccc,
+                    specular: 0x111111,
+                    shininess: 30
+                });
+            }
+        });
+        solidGroup.add(obj);
+    }, undefined, (err) => console.error('Solid mesh error:', err));
 }
 
 // ═══════════════════════════════════════════
@@ -222,6 +256,7 @@ async function evaluate() {
 
         showVariant(activeRunIdx, activeVariantIdx);
         updateRunList();
+        updateResultsTable();
         drawChart();
         setStatus(runName + ' COMPLETE — ' + variants.length + ' VARIANTS');
 
@@ -246,6 +281,10 @@ function showVariant(runIdx, varIdx) {
 
     const showGradient = document.getElementById('show-gradient').checked;
     renderStructure(v.data, showGradient);
+    
+    const showSolid = document.getElementById('show-solid').checked;
+    if (showSolid) loadSolidMesh(varIdx);
+    else while (solidGroup.children.length) solidGroup.remove(solidGroup.children[0]);
 
     // Auto-fit camera to structure
     const structureBbox = new THREE.Box3().setFromObject(structureGroup);
@@ -317,6 +356,25 @@ document.getElementById('unit-system').addEventListener('change', () => {
     }
     updateUnitLabels();
 });
+
+function updateResultsTable() {
+    const list = document.getElementById('results-table-container');
+    const run = allRuns[activeRunIdx];
+    if (!run) return;
+
+    let html = '<table style="width:100%; border-collapse:collapse; background:rgba(255,255,255,0.05);">';
+    html += '<tr style="border-bottom:1px solid #333;"><th>OPTIM</th><th>CARBON</th><th>COST</th><th>DRIFT</th></tr>';
+    run.variants.forEach(v => {
+        html += `<tr style="border-bottom:1px solid #222;">
+            <td>${v.name}</td>
+            <td>${Number(v.metrics.Carbon_kgCO2e).toLocaleString()}</td>
+            <td>$${Number(v.metrics.Cost_USD).toLocaleString()}</td>
+            <td>${Number(v.metrics.Max_Disp).toFixed(4)}</td>
+        </tr>`;
+    });
+    html += '</table>';
+    list.innerHTML = html;
+}
 
 // ═══════════════════════════════════════════
 // MINI CHART (Canvas 2D) — compares all 3 variants of latest run
@@ -405,6 +463,13 @@ document.getElementById('show-structure').addEventListener('change', (e) => {
 document.getElementById('show-gradient').addEventListener('change', () => {
     const v = getActiveVariant();
     if (v) renderStructure(v.data, document.getElementById('show-gradient').checked);
+});
+document.getElementById('show-solid').addEventListener('change', () => {
+    const v = getActiveVariant();
+    if (v) {
+        if (document.getElementById('show-solid').checked) loadSolidMesh(activeVariantIdx);
+        else while (solidGroup.children.length) solidGroup.remove(solidGroup.children[0]);
+    }
 });
 
 // ═══════════════════════════════════════════

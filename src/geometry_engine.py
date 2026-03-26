@@ -79,10 +79,17 @@ class GeometryEngine:
                     # Calculate centroids for core positioning advice
                     centroid_3d = cross_section.centroid
                     
+                    # Core Coverage Logic (60m / 200ft rule)
+                    # For a crude approximation, check the 'radius' of the floor
+                    # If the distance from centroid to furthest boundary point is > 60m, suggest multiple cores
+                    max_dist = np.linalg.norm(cross_section.bounds[1][:2] - cross_section.bounds[0][:2]) / 2
+                    suggested_core_count = int(np.ceil(max_dist / 60.0))
+                    
                     floors.append({
                         "elevation_z": z,
                         "area_sqft": area_sqft,
                         "centroid": [float(centroid_3d[0]), float(centroid_3d[1])],
+                        "suggested_core_count": max(1, suggested_core_count),
                         "bounds_2d": {
                             "x_min": float(cross_section.bounds[0][0]),
                             "x_max": float(cross_section.bounds[1][0]),
@@ -99,6 +106,21 @@ class GeometryEngine:
             "floors": floors,
             "avg_floor_area": total_sqft / len(floors) if floors else 0
         }
+
+    def get_max_height_points(self):
+        """
+        Identify the (X, Y) coordinates where the building reaches its maximum Z.
+        This is where elevator cores MUST be placed to reach the rooftop.
+        """
+        verts = self.mesh.vertices
+        max_z = np.max(verts[:, 2])
+        # Find all vertices at roughly the max height (1m tolerance)
+        peak_mask = verts[:, 2] > (max_z - 1.0)
+        peak_verts = verts[peak_mask]
+        
+        # Return unique X, Y coordinates for these peak points
+        # Clustering would be better, but for now take the average of local maxima
+        return [[float(np.mean(peak_verts[:, 0])), float(np.mean(peak_verts[:, 1]))]]
 
     def sample_internal_nodes(self, grid_spacing=5.0):
         """
@@ -120,6 +142,51 @@ class GeometryEngine:
         
         print(f"Sampled {len(internal_points)} internal nodes within mesh volume.")
         return internal_points.tolist()
+
+    def generate_solid_structure(self, graph):
+        """
+        Generate a solid 3D mesh (trimesh.Trimesh) by extruding cylinders 
+        along each graph edge. Radius is derived from section area.
+        """
+        from config import SECTIONS
+        import networkx as nx
+        
+        all_meshes = []
+        
+        for u, v, data in graph.edges(data=True):
+            p1 = np.array(graph.nodes[u]["coords"])
+            p2 = np.array(graph.nodes[v]["coords"])
+            
+            section_name = data.get("section", "IPE_300")
+            area_in2 = 8.34 # default
+            for mat_type in SECTIONS:
+                if section_name in SECTIONS[mat_type]:
+                    area_in2 = SECTIONS[mat_type][section_name]["A"]
+                    break
+            
+            area_m2 = area_in2 * 6.4516e-4
+            radius = np.sqrt(area_m2 / np.pi)
+            
+            edge_vec = p2 - p1
+            length = np.linalg.norm(edge_vec)
+            if length < 1e-6: continue
+            
+            cylinder = trimesh.creation.cylinder(radius=radius, height=length)
+            
+            z_axis = [0, 0, 1]
+            rotation, _ = trimesh.geometry.align_vectors(z_axis, edge_vec)
+            
+            midpoint = (p1 + p2) / 2.0
+            matrix = np.eye(4)
+            matrix[:3, :3] = rotation[:3, :3]
+            matrix[:3, 3] = midpoint
+            
+            cylinder.apply_transform(matrix)
+            all_meshes.append(cylinder)
+            
+        if not all_meshes:
+            return None
+        return trimesh.util.concatenate(all_meshes)
 
 if __name__ == "__main__":
     # Example usage / test stub

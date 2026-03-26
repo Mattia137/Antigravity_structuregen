@@ -85,6 +85,7 @@ def _graph_to_response(graph, fea_results, material_params, mat_type):
             "role": edata.get("section_type", "secondary_lattice"),
             "section": edata.get("section", mat_type),
             "connection": edata.get("connection", "fixed"),
+            "typology": edata.get("typology", "welded"),
             "disp_i": round(disp_i, 4),
             "disp_j": round(disp_j, 4)
         })
@@ -168,11 +169,13 @@ def evaluate():
             primary_edges.append({"source": u, "target": v_idx, "type": etype})
 
         internal_nodes = ge.sample_internal_nodes(grid_spacing=8.0) # meter spacing
+        peak_points = ge.get_max_height_points()
 
         base_geom = {
             "primary_nodes": primary_nodes,
             "primary_edges": primary_edges,
             "internal_nodes": internal_nodes,
+            "peak_points": peak_points,
             "sqft_data": ge.slice_mesh_horizontally(),
             "bounds": {
                 "x_min": float(all_verts[:, 0].min()), "x_max": float(all_verts[:, 0].max()),
@@ -230,6 +233,14 @@ def evaluate():
     balanced_idx = next((i for i, v in enumerate(output_variants) if v["name"] == "BALANCED"), 0)
     primary_variant = output_variants[balanced_idx]
 
+    LATEST_VARIANTS.clear()
+    LATEST_VARIANTS.extend(output_variants)
+    
+    # Store the actual graph objects for solid mesh generation later
+    # We'll attach them to the output_variants for easy access
+    for idx, v in enumerate(variant_results):
+        output_variants[idx]["_graph"] = v["graph"]
+
     return jsonify({
         'variants': output_variants,
         'nodes':   primary_variant['nodes'],
@@ -238,6 +249,28 @@ def evaluate():
         'max_disp': primary_variant['max_disp'],
         'unit': 'm'
     })
+
+@app.route('/api/solid_mesh/<int:variant_idx>', methods=['GET'])
+def get_solid_mesh(variant_idx):
+    if not LATEST_VARIANTS or variant_idx >= len(LATEST_VARIANTS):
+        return jsonify({'error': 'No variants available'}), 404
+    
+    v = LATEST_VARIANTS[variant_idx]
+    graph = v.get("_graph")
+    if not graph:
+        return jsonify({'error': 'Graph data missing'}), 404
+    
+    from src.geometry_engine import GeometryEngine
+    # We need a temp mesh path or just dummy for ge
+    ge = GeometryEngine("temp_mesh_mass-DEF.obj") 
+    solid_mesh = ge.generate_solid_structure(graph)
+    
+    if solid_mesh:
+        import io
+        obj_data = trimesh.exchange.obj.export_obj(solid_mesh)
+        return obj_data, 200, {'Content-Type': 'text/plain'}
+    else:
+        return jsonify({'error': 'Failed to generate solid mesh'}), 500
 
 if __name__ == '__main__':
     print("  AI GENERATIVE SERVER running at http://localhost:5000")

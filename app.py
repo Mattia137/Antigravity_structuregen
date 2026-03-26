@@ -168,6 +168,49 @@ if uploaded_mesh is not None:
                 active_nodes = {str(n): {"x": coords[0], "y": coords[1], "z": coords[2]} for n, coords in final_graph.nodes(data="coords")}
                 active_members = [{"from": str(u), "to": str(v), "disp_i": 0, "disp_j": 0} for u, v in final_graph.edges()]
 
+            # --- RESULTS TABLE & DIAGRAM ---
+            if "variants" in st.session_state:
+                st.header("Optimization Comparison")
+                colA, colB = st.columns([1, 1.5])
+                
+                with colA:
+                    st.subheader("Performance Metrics Table")
+                    import pandas as pd
+                    table_data = []
+                    for v in st.session_state.variants:
+                        m = v["metrics"]
+                        table_data.append({
+                            "Variant": v["name"],
+                            "Cost ($)": f"${m['Cost_USD']:,.0f}",
+                            "Carbon (kgCO2e)": f"{m['Carbon_kgCO2e']:,.0f}",
+                            "Max Disp (m)": f"{m['Max_Disp']:.4f}"
+                        })
+                    st.table(pd.DataFrame(table_data))
+                
+                with colB:
+                    st.subheader("Comparative Pareto Analysis")
+                    # Radar or Scatter comparison
+                    v_names = [v["name"] for v in st.session_state.variants]
+                    v_costs = [v["metrics"]["Cost_USD"] for v in st.session_state.variants]
+                    v_carbon = [v["metrics"]["Carbon_kgCO2e"] for v in st.session_state.variants]
+                    v_disp = [v["metrics"]["Max_Disp"] for v in st.session_state.variants]
+                    
+                    # Normalized data for radar
+                    n_costs = [c / max(v_costs) for c in v_costs]
+                    n_carbon = [ca / max(v_carbon) for ca in v_carbon]
+                    n_disp = [d / max(v_disp) for d in v_disp]
+                    
+                    fig_diag = go.Figure()
+                    for idx, name in enumerate(v_names):
+                        fig_diag.add_trace(go.Scatterpolar(
+                            r=[n_costs[idx], n_carbon[idx], n_disp[idx]],
+                            theta=['Cost', 'Carbon', 'Displacement'],
+                            fill='toself',
+                            name=name
+                        ))
+                    fig_diag.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), showlegend=True)
+                    st.plotly_chart(fig_diag, use_container_width=True)
+
             edge_x = []
             edge_y = []
             edge_z = []

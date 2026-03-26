@@ -80,24 +80,31 @@ TASKS:
    - Add nodes from "internal_nodes" to create a complex internal structural network.
    - Triangulate for global stability (see "Triangulation" in research patterns).
 3. ASSIGN SECTIONS: Choose from {section_list} based on manual rules.
-4. PLACE CONCRETE CORES: 
+4. IDENTIFY CONNECTION TYPOLOGY (MANDATORY):
+   - `welded`: High-moment primary joints (beam-to-column, primary frame nodes).
+   - `hinge`: Secondary diagonal braces and pinned lattice nodes.
+   - `steel_plate`: Secondary beam-to-column or tie-beam connections.
+5. PLACE CONCRETE CORES (CODE COMPLIANCE): 
    - Min 1.5% GFA. 
-   - Position based on plan centroids in sqft_data.
-   - Aspect ratio 4:1 to 8:1.
+   - Position cores at "PEAK POINTS" (Max Height) to ensure elevators reach the rooftop.
+   - Ensure the "SUGGESTED CORE COUNT" is met for large buildings (every floor point must be within 60m of a core).
 
 OUTPUT: Return ONLY JSON:
 {{
   "nodes": [{{"id": int, "x": float, "y": float, "z": float}}],
-  "edges": [{{"source": int, "target": int, "type": "primary_crease|secondary_lattice", "section": "string", "connection": "fixed|pinned"}}],
+  "edges": [{{"source": int, "target": int, "type": "primary_crease|secondary_lattice", "section": "string", "connection": "fixed|pinned", "typology": "welded|hinge|steel_plate"}}],
   "cores": [{{"x": float, "y": float, "thickness": float, "width": float, "depth": float}}]
 }}
 """
+
+        peak_points = geometry_data.get("peak_points", [])
 
         user_message = (
             f"PRIMARY NODES ({len(primary_nodes)} nodes):\n{json.dumps(primary_nodes)}\n\n"
             f"PRIMARY EDGES ({len(primary_edges)} edges):\n{json.dumps(primary_edges)}\n\n"
             f"INTERNAL NODES ({len(internal_nodes)} sample points):\n{json.dumps(internal_nodes[:100])}\n\n"
-            f"SQFT DATA: {json.dumps(sqft_data)}\n"
+            f"PEAK POINTS (Max Height locations): {json.dumps(peak_points)}\n"
+            f"SQFT DATA & SUGGESTED CORES: {json.dumps(sqft_data)}\n"
             f"BOUNDS: {json.dumps(bounds)}"
         )
 
@@ -192,9 +199,15 @@ OUTPUT: Return ONLY JSON:
                     })
                 nid += 1
 
-        cores = [{"x": float(arr[:, 0].mean()), "y": float(arr[:, 1].mean()), "thickness": 0.3}]
-        print(f"Fallback: {len(nodes)} nodes, {len(edges)} edges")
-        return {"nodes": nodes, "edges": edges, "cores": cores}
+        cores = [{"x": p[0], "y": p[1], "thickness": 0.3, "width": 6.0, "depth": 6.0} for p in geometry_data.get("peak_points", [[0,0]])]
+        
+        # Ensure fallback edges have typologies
+        final_edges = []
+        for e in edges:
+            e["typology"] = "welded" if e["type"] == "primary_crease" else "hinge"
+            final_edges.append(e)
+
+        return {"nodes": nodes, "edges": final_edges, "cores": cores}
 
     def _generic_cube_fallback(self) -> dict:
         """Ultra-fallback: simple 3D frame when no geometry is available."""
@@ -229,13 +242,14 @@ OUTPUT: Return ONLY JSON:
         for node in design_json.get("nodes", []):
             G.add_node(node["id"], coords=(node["x"], node["y"], node["z"]))
 
-        for edge in design_json.get("edges", []):
-            G.add_edge(
-                edge["source"], edge["target"],
-                section_type=edge.get("type", "secondary_lattice"),
-                section=edge.get("section", None),
-                connection=edge.get("connection", "fixed")
-            )
+        G.add_edges_from([
+            (e["source"], e["target"], {
+                "section_type": e.get("type", "secondary_lattice"),
+                "section": e.get("section"),
+                "connection": e.get("connection", "fixed"),
+                "typology": e.get("typology", "welded")
+            }) for e in design_json.get("edges", [])
+        ])
 
         G.graph["shear_cores"] = design_json.get("cores", [])
         print(f"Graph constructed: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges.")
