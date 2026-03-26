@@ -60,9 +60,72 @@ class AIDesigner:
             import traceback
             with open("ai_crash.log", "w") as f:
                 f.write(traceback.format_exc())
-            print(f"Failed to generate AI structural design: {e}")
-            # Fallback mock schema for testing resilience
-            return {"nodes": [], "edges": [], "cores": []}
+            print(f"Gemini API failed: {e}. Using geometric fallback.")
+            return self._geometric_fallback(geometry_data)
+    
+    def _geometric_fallback(self, geometry_data: dict) -> dict:
+        """
+        When the AI API is unavailable, generate a valid structural frame
+        directly from the input geometry bounding box.
+        """
+        verts = geometry_data.get("vertices", [])
+        if not verts:
+            verts = [[0,0,0], [10,0,0], [10,10,0], [0,10,0],
+                     [0,0,10], [10,0,10], [10,10,10], [0,10,10]]
+        
+        import numpy as _np
+        arr = _np.array(verts)
+        mins = arr.min(axis=0)
+        maxs = arr.max(axis=0)
+        cx, cy = (mins[0]+maxs[0])/2, (mins[1]+maxs[1])/2
+        
+        x0, x1 = float(mins[0]), float(maxs[0])
+        y0, y1 = float(mins[1]), float(maxs[1])
+        z0, z1 = float(mins[2]), float(maxs[2])
+        
+        height = z1 - z0
+        floor_h = max(3.0, height / max(1, int(height / 3.0)))
+        n_floors = max(1, int(height / floor_h))
+        
+        nodes = []
+        edges = []
+        nid = 0
+        
+        # Create a column-grid frame: 4 corners + center at each floor level
+        floor_nodes = {}
+        for fi in range(n_floors + 1):
+            z = float(z0 + fi * floor_h)
+            corners = [
+                (x0, y0, z), (x1, y0, z),
+                (x1, y1, z), (x0, y1, z),
+                (float(cx), float(cy), z)
+            ]
+            level_ids = []
+            for (px, py, pz) in corners:
+                nodes.append({"id": nid, "x": px, "y": py, "z": pz})
+                level_ids.append(nid)
+                nid += 1
+            floor_nodes[fi] = level_ids
+            
+            # Horizontal ring beams at this floor
+            for i in range(4):
+                edges.append({"source": level_ids[i], "target": level_ids[(i+1)%4], "type": "primary_crease"})
+            # Diagonals to center
+            for i in range(4):
+                edges.append({"source": level_ids[i], "target": level_ids[4], "type": "secondary_lattice"})
+        
+        # Vertical columns connecting floors
+        for fi in range(n_floors):
+            for ci in range(5):
+                edges.append({"source": floor_nodes[fi][ci], "target": floor_nodes[fi+1][ci], "type": "primary_crease"})
+            # X-bracing on each face
+            for ci in range(4):
+                edges.append({"source": floor_nodes[fi][ci], "target": floor_nodes[fi+1][(ci+1)%4], "type": "secondary_lattice"})
+        
+        cores = [{"x": float(cx), "y": float(cy), "thickness": 0.3}]
+        
+        print(f"Geometric fallback generated: {len(nodes)} nodes, {len(edges)} edges, {n_floors} floors")
+        return {"nodes": nodes, "edges": edges, "cores": cores}
 
     def construct_graph(self, design_json: dict) -> nx.Graph:
         """
