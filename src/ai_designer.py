@@ -3,6 +3,10 @@ import json
 import networkx as nx
 import google.generativeai as genai
 
+# Available cross-section names (must match config.py SECTIONS keys)
+STEEL_SECTIONS = ["W14x283", "W14x90", "W12x50", "IPE_300", "HEA_200", "Tubular_HSS_4x4x1/4"]
+CONCRETE_SECTIONS = ["Rect_16x16", "Circ_16", "Floor_Tie", "Core_Massive"]
+
 class AIDesigner:
     def __init__(self, manual_path="knowledge_base/structural_manual.md"):
         """
@@ -10,9 +14,8 @@ class AIDesigner:
         """
         api_key = os.environ.get("GEMINI_AGENT_01", "DUMMY_KEY_FOR_TESTING")
         genai.configure(api_key=api_key)
-        # Using the ultra-fast Flash model to minimize architecture latency while maintaining JSON schema precision
         self.model = genai.GenerativeModel('gemini-1.5-flash')
-        
+
         try:
             with open(manual_path, "r", encoding="utf-8") as f:
                 self.structural_manual = f.read()
@@ -21,132 +24,213 @@ class AIDesigner:
 
     def request_design(self, geometry_data: dict) -> dict:
         """
-        Package the raw vertices, creases, SqFt data, and a summary of structural_manual.md into a system prompt.
-        Commands the API to Design and return a structured JSON.
+        Build a Gemini prompt that:
+          1. Takes mesh crease vertices as PRIMARY nodes (coordinates must be preserved exactly).
+          2. Takes mesh crease edges as PRIMARY structural members.
+          3. Asks Gemini to add SECONDARY nodes/edges only where structurally necessary.
+          4. Assigns a cross-section and connection type to every edge.
         """
-        system_prompt = f"""
-        You are the Lead Computational Structural Engineer.
-        Knowledge base constraining your design logic:
-        {self.structural_manual}
-        
-        Mandatory Generative Design Tasks:
-        1. Receive the extracted vertices, creases (>20 deg dihedral), and SqFt metrics.
-        2. Assign heavy cross-sections ('primary_crease') to the primary crease lines.
-        3. Generate a secondary triangulated lattice connecting the remaining boundary nodes to prevent local buckling.
-        4. Define exact X,Y coordinates for LABC-compliant concrete shear cores (considering aspect ratios and SqFt).
-        5. Return exclusively a structured JSON defining the adjacency matrix (connectivity between nodes), cross-sections, and core placement.
-        
-        JSON Schema requirement:
-        - "nodes": list of {{"id": int, "x": float, "y": float, "z": float}}
-        - "edges": list of {{"source": int, "target": int, "type": string (either 'primary_crease' or 'secondary_lattice')}}
-        - "cores": list of {{"x": float, "y": float, "thickness": float}}
-        """
-        
-        # In a real environment, large geometry_data JSON needs to be within token limits.
-        user_message = f"Extracted Geometry Data Payload:\n{json.dumps(geometry_data)}"
-        
+        primary_nodes = geometry_data.get("primary_nodes", [])
+        primary_edges = geometry_data.get("primary_edges", [])
+        sqft_data = geometry_data.get("sqft_data", {})
+        bounds = geometry_data.get("bounds", {})
+        feedback = geometry_data.get("optimization_feedback", "")
+
+        # Infer material from feedback context (default Steel)
+        section_list = STEEL_SECTIONS
+
+        system_prompt = f"""You are the Lead Computational Structural Engineer performing generative structural design.
+
+KNOWLEDGE BASE:
+{self.structural_manual}
+
+---
+WORKFLOW:
+
+You receive:
+- "primary_nodes": nodes extracted from mesh crease vertices — these are the PRIMARY structural nodes.
+  Their (x, y, z) coordinates are EXACT and must NOT be modified.
+- "primary_edges": edges extracted from mesh crease lines — these are the PRIMARY structural members.
+- "sqft_data": floor area data.
+- "bounds": overall mesh extents (meters).
+- "optimization_feedback": FEA results from the previous iteration (empty on first run).
+
+YOUR TASKS:
+
+TASK 1 — PRESERVE PRIMARY STRUCTURE (mandatory):
+  • Output ALL primary_nodes with their EXACT coordinates (copy id, x, y, z verbatim).
+  • Output ALL primary_edges as type "primary_crease".
+
+TASK 2 — ADD SECONDARY STRUCTURE (add only what is structurally necessary):
+  • Evaluate the primary topology for:
+      - Unbraced column lengths > L/360 serviceability limit
+      - Missing lateral / X-bracing between floors
+      - Out-of-plane instability zones
+      - Local buckling risks in long primary members
+  • If needed, add new secondary nodes (IDs starting after the last primary node ID)
+    and secondary_lattice edges to address these issues.
+  • Minimise secondary additions — only add what is required.
+
+TASK 3 — ASSIGN CROSS-SECTIONS (every edge must have a "section"):
+  Choose from this list only: {section_list}
+
+  Assignment rules:
+  - Primary creases carrying gravity loads (vertical/near-vertical): W14x90 or W14x283 for heavy columns
+  - Primary creases spanning horizontally (beams, arches): W12x50 or IPE_300
+  - Secondary lattice / bracing members: HEA_200 or Tubular_HSS_4x4x1/4
+  - Assign heavier sections where members are long or carry high load paths.
+
+TASK 4 — ASSIGN CONNECTION TYPES (every edge must have a "connection"):
+  - "fixed": moment-resisting connection — use for beams, continuous columns, moment frames
+  - "pinned": pin/truss connection — use for bracing members, secondary lattice, short ties
+
+TASK 5 — SHEAR CORE PLACEMENT:
+  Place LABC-compliant concrete shear cores per the knowledge base rules (centralized, C-shape around service cores).
+
+{f"OPTIMIZATION FEEDBACK FROM PREVIOUS FEA RUN: {feedback}" if feedback else ""}
+
+OUTPUT: Return ONLY this JSON (no markdown, no extra text):
+{{
+  "nodes": [{{"id": int, "x": float, "y": float, "z": float}}],
+  "edges": [{{"source": int, "target": int, "type": "primary_crease|secondary_lattice", "section": "string", "connection": "fixed|pinned"}}],
+  "cores": [{{"x": float, "y": float, "thickness": float}}]
+}}
+"""
+
+        user_message = (
+            f"PRIMARY NODES ({len(primary_nodes)} nodes):\n{json.dumps(primary_nodes)}\n\n"
+            f"PRIMARY EDGES ({len(primary_edges)} edges):\n{json.dumps(primary_edges)}\n\n"
+            f"SQFT DATA: {json.dumps(sqft_data)}\n"
+            f"BOUNDS: {json.dumps(bounds)}"
+        )
+
         try:
-            # We enforce JSON response
             response = self.model.generate_content(
-                contents=[
-                    {"role": "user", "parts": [{"text": system_prompt + "\n\n" + user_message}]}
-                ],
-                generation_config=genai.GenerationConfig(
-                    response_mime_type="application/json",
-                )
+                contents=[{"role": "user", "parts": [{"text": system_prompt + "\n\n" + user_message}]}],
+                generation_config=genai.GenerationConfig(response_mime_type="application/json")
             )
-            return json.loads(response.text)
+            result = json.loads(response.text)
+            # Validate that primary nodes are present in the output
+            if not result.get("nodes") or len(result["nodes"]) < len(primary_nodes):
+                print("Gemini response missing primary nodes. Falling back.")
+                return self._geometric_fallback(geometry_data)
+            return result
         except Exception as e:
             import traceback
             with open("ai_crash.log", "w") as f:
                 f.write(traceback.format_exc())
             print(f"Gemini API failed: {e}. Using geometric fallback.")
             return self._geometric_fallback(geometry_data)
-    
+
     def _geometric_fallback(self, geometry_data: dict) -> dict:
         """
-        When the AI API is unavailable, generate a valid structural frame
-        directly from the input geometry bounding box.
+        Fallback when Gemini is unavailable.
+        Uses the actual mesh crease nodes and edges as primary structure,
+        then adds minimal secondary members (floor centroid stabilisers).
         """
-        verts = geometry_data.get("vertices", [])
-        if not verts:
-            verts = [[0,0,0], [10,0,0], [10,10,0], [0,10,0],
-                     [0,0,10], [10,0,10], [10,10,10], [0,10,10]]
-        
         import numpy as _np
-        arr = _np.array(verts)
-        mins = arr.min(axis=0)
-        maxs = arr.max(axis=0)
-        cx, cy = (mins[0]+maxs[0])/2, (mins[1]+maxs[1])/2
-        
-        x0, x1 = float(mins[0]), float(maxs[0])
-        y0, y1 = float(mins[1]), float(maxs[1])
-        z0, z1 = float(mins[2]), float(maxs[2])
-        
-        height = z1 - z0
-        floor_h = max(3.0, height / max(1, int(height / 3.0)))
-        n_floors = max(1, int(height / floor_h))
-        
-        nodes = []
-        edges = []
-        nid = 0
-        
-        # Create a column-grid frame: 4 corners + center at each floor level
-        floor_nodes = {}
-        for fi in range(n_floors + 1):
-            z = float(z0 + fi * floor_h)
-            corners = [
-                (x0, y0, z), (x1, y0, z),
-                (x1, y1, z), (x0, y1, z),
-                (float(cx), float(cy), z)
+
+        primary_nodes = geometry_data.get("primary_nodes", [])
+        primary_edges = geometry_data.get("primary_edges", [])
+
+        # Legacy format compatibility
+        if not primary_nodes:
+            vertices = geometry_data.get("vertices", [])
+            primary_nodes = [
+                {"id": i, "x": float(v[0]), "y": float(v[1]), "z": float(v[2])}
+                for i, v in enumerate(vertices)
             ]
-            level_ids = []
-            for (px, py, pz) in corners:
-                nodes.append({"id": nid, "x": px, "y": py, "z": pz})
-                level_ids.append(nid)
-                nid += 1
-            floor_nodes[fi] = level_ids
-            
-            # Horizontal ring beams at this floor
-            for i in range(4):
-                edges.append({"source": level_ids[i], "target": level_ids[(i+1)%4], "type": "primary_crease"})
-            # Diagonals to center
-            for i in range(4):
-                edges.append({"source": level_ids[i], "target": level_ids[4], "type": "secondary_lattice"})
-        
-        # Vertical columns connecting floors
-        for fi in range(n_floors):
-            for ci in range(5):
-                edges.append({"source": floor_nodes[fi][ci], "target": floor_nodes[fi+1][ci], "type": "primary_crease"})
-            # X-bracing on each face
-            for ci in range(4):
-                edges.append({"source": floor_nodes[fi][ci], "target": floor_nodes[fi+1][(ci+1)%4], "type": "secondary_lattice"})
-        
-        cores = [{"x": float(cx), "y": float(cy), "thickness": 0.3}]
-        
-        print(f"Geometric fallback generated: {len(nodes)} nodes, {len(edges)} edges, {n_floors} floors")
+
+        if len(primary_nodes) < 2:
+            return self._generic_cube_fallback()
+
+        # Start with all primary nodes
+        nodes = [{"id": n["id"], "x": n["x"], "y": n["y"], "z": n["z"]} for n in primary_nodes]
+
+        # Primary edges with default steel sections
+        edges = [
+            {"source": e["source"], "target": e["target"],
+             "type": "primary_crease", "section": "IPE_300", "connection": "fixed"}
+            for e in primary_edges
+        ]
+
+        nid = max(n["id"] for n in nodes) + 1
+
+        # Group nodes by floor Z level (±0.5 m tolerance) and add centroid stabilisers
+        arr = _np.array([[n["x"], n["y"], n["z"]] for n in nodes])
+        z_vals = _np.round(arr[:, 2], 1)
+        unique_z = _np.unique(z_vals)
+
+        for z_level in unique_z:
+            floor_mask = _np.abs(arr[:, 2] - z_level) < 0.5
+            floor_indices = _np.where(floor_mask)[0]
+            floor_ids = [nodes[i]["id"] for i in floor_indices]
+
+            if len(floor_ids) < 3:
+                continue
+
+            cx = float(arr[floor_mask, 0].mean())
+            cy = float(arr[floor_mask, 1].mean())
+
+            nodes.append({"id": nid, "x": cx, "y": cy, "z": float(z_level)})
+            for fid in floor_ids:
+                edges.append({
+                    "source": fid, "target": nid,
+                    "type": "secondary_lattice", "section": "HEA_200", "connection": "pinned"
+                })
+            nid += 1
+
+        # Shear core at plan centroid
+        cores = [{"x": float(arr[:, 0].mean()), "y": float(arr[:, 1].mean()), "thickness": 0.3}]
+
+        print(f"Crease-based fallback: {len(nodes)} nodes, {len(edges)} edges")
+        return {"nodes": nodes, "edges": edges, "cores": cores}
+
+    def _generic_cube_fallback(self) -> dict:
+        """Ultra-fallback: simple 3D frame when no geometry is available."""
+        nodes = [
+            {"id": 0, "x": 0, "y": 0, "z": 0}, {"id": 1, "x": 10, "y": 0, "z": 0},
+            {"id": 2, "x": 10, "y": 10, "z": 0}, {"id": 3, "x": 0, "y": 10, "z": 0},
+            {"id": 4, "x": 0, "y": 0, "z": 10}, {"id": 5, "x": 10, "y": 0, "z": 10},
+            {"id": 6, "x": 10, "y": 10, "z": 10}, {"id": 7, "x": 0, "y": 10, "z": 10},
+        ]
+        edges = [
+            {"source": 0, "target": 4, "type": "primary_crease", "section": "W14x90", "connection": "fixed"},
+            {"source": 1, "target": 5, "type": "primary_crease", "section": "W14x90", "connection": "fixed"},
+            {"source": 2, "target": 6, "type": "primary_crease", "section": "W14x90", "connection": "fixed"},
+            {"source": 3, "target": 7, "type": "primary_crease", "section": "W14x90", "connection": "fixed"},
+            {"source": 4, "target": 5, "type": "primary_crease", "section": "IPE_300", "connection": "fixed"},
+            {"source": 5, "target": 6, "type": "primary_crease", "section": "IPE_300", "connection": "fixed"},
+            {"source": 6, "target": 7, "type": "primary_crease", "section": "IPE_300", "connection": "fixed"},
+            {"source": 7, "target": 4, "type": "primary_crease", "section": "IPE_300", "connection": "fixed"},
+            {"source": 4, "target": 6, "type": "secondary_lattice", "section": "Tubular_HSS_4x4x1/4", "connection": "pinned"},
+            {"source": 5, "target": 7, "type": "secondary_lattice", "section": "Tubular_HSS_4x4x1/4", "connection": "pinned"},
+        ]
+        cores = [{"x": 5.0, "y": 5.0, "thickness": 0.3}]
         return {"nodes": nodes, "edges": edges, "cores": cores}
 
     def construct_graph(self, design_json: dict) -> nx.Graph:
         """
-        Construct the 3D structural graph in Python using the API's response.
-        Utilizes networkx to build the adjacency and node attributes.
+        Construct the 3D structural graph from the AI/fallback response.
+        Stores section name and connection type on each edge.
         """
         G = nx.Graph()
-        
-        # Add nodes
+
         for node in design_json.get("nodes", []):
             G.add_node(node["id"], coords=(node["x"], node["y"], node["z"]))
-            
-        # Add edges (adjacency matrix)
+
         for edge in design_json.get("edges", []):
-            G.add_edge(edge["source"], edge["target"], section_type=edge.get("type", "secondary_lattice"))
-            
-        # Store LABC shear core locations as graph-level metadata
+            G.add_edge(
+                edge["source"], edge["target"],
+                section_type=edge.get("type", "secondary_lattice"),
+                section=edge.get("section", None),
+                connection=edge.get("connection", "fixed")
+            )
+
         G.graph["shear_cores"] = design_json.get("cores", [])
-        
         print(f"Graph constructed: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges.")
         return G
+
 
 if __name__ == "__main__":
     designer = AIDesigner()

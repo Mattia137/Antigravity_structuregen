@@ -188,6 +188,7 @@ async function evaluate() {
     try {
         const res = await fetch('/api/evaluate', {
             method: 'POST',
+            cache: 'no-store',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
@@ -212,6 +213,22 @@ async function evaluate() {
         // Render
         const showGradient = document.getElementById('show-gradient').checked;
         renderStructure(data, showGradient);
+
+        // Auto-fit camera to the rendered structural frame
+        // This ensures the frame is visible even when the OBJ mesh fails to load
+        const structureBbox = new THREE.Box3().setFromObject(structureGroup);
+        if (!structureBbox.isEmpty()) {
+            const center = structureBbox.getCenter(new THREE.Vector3());
+            const size = structureBbox.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+            controls.target.copy(center);
+            camera.position.set(
+                center.x + maxDim * 1.2,
+                center.y + maxDim * 0.8,
+                center.z + maxDim * 1.2
+            );
+            controls.update();
+        }
 
         updateIterationList();
         drawChart();
