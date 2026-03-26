@@ -10,8 +10,8 @@ class AIDesigner:
         """
         api_key = os.environ.get("GEMINI_AGENT_01", "DUMMY_KEY_FOR_TESTING")
         genai.configure(api_key=api_key)
-        # Using a model capable of deep reasoning and JSON parsing
-        self.model = genai.GenerativeModel('gemini-2.5-pro')
+        # Using the ultra-fast Flash model to minimize architecture latency while maintaining JSON schema precision
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
         
         try:
             with open(manual_path, "r", encoding="utf-8") as f:
