@@ -12,6 +12,9 @@ class GeometryEngine:
         if isinstance(self.mesh, trimesh.Scene):
             self.mesh = self.mesh.dump(concatenate=True)
             
+        # Merge identical vertices so we can compute adjacency and angles properly
+        self.mesh.merge_vertices()
+
         print(f"Loaded mesh {filepath} with {len(self.mesh.vertices)} vertices and {len(self.mesh.faces)} faces.")
 
     def extract_boundary_nodes(self):
@@ -48,10 +51,9 @@ class GeometryEngine:
             "nodes": crease_nodes.tolist()
         }
 
-    def slice_mesh_horizontally(self, floor_height=3.0):
+    def slice_mesh_horizontally(self, floor_height=4.0):
         """
         Slice the mesh horizontally to determine floor heights and calculate total usable SqFt.
-        Assumes Z is the vertical axis and units are meters.
         Returns total square footage and per-floor data.
         """
         bounds = self.mesh.bounds
@@ -60,6 +62,9 @@ class GeometryEngine:
         total_height = z_max - z_min
         num_floors = int(np.floor(total_height / floor_height))
         
+        if num_floors == 0:
+            num_floors = 1
+
         z_levels = [z_min + (i * floor_height) for i in range(1, num_floors + 1)]
         
         total_sqft = 0.0
@@ -67,23 +72,18 @@ class GeometryEngine:
         
         for z in z_levels:
             try:
-                # Get cross section at elevation z
                 cross_section = self.mesh.section(plane_origin=[0, 0, z], plane_normal=[0, 0, 1])
                 if cross_section is not None:
-                    # Convert to planar 2D to calculate area safely
                     planar, _ = cross_section.to_planar()
                     area_m2 = planar.area
                     area_sqft = area_m2 * 10.7639
                     total_sqft += area_sqft
                     
-                    # Calculate centroids for core positioning advice
                     centroid_3d = cross_section.centroid
                     
-                    # Core Coverage Logic (60m / 200ft rule)
-                    # For a crude approximation, check the 'radius' of the floor
-                    # If the distance from centroid to furthest boundary point is > 60m, suggest multiple cores
-                    max_dist = np.linalg.norm(cross_section.bounds[1][:2] - cross_section.bounds[0][:2]) / 2
-                    suggested_core_count = int(np.ceil(max_dist / 60.0))
+                    # 200 ft rule: 60.96m. If bounding box diag > 2 * 60.96, multiple cores needed.
+                    max_dist = np.linalg.norm(cross_section.bounds[1][:2] - cross_section.bounds[0][:2]) / 2.0
+                    suggested_core_count = int(np.ceil(max_dist / 60.96))
                     
                     floors.append({
                         "elevation_z": z,
@@ -111,16 +111,65 @@ class GeometryEngine:
         """
         Identify the (X, Y) coordinates where the building reaches its maximum Z.
         This is where elevator cores MUST be placed to reach the rooftop.
+        Additionally, enforce the 200ft (60.96m) rule across the entire floorplate
+        so that NO point on ANY horizontal floor plate is more than 200ft from a core.
         """
         verts = self.mesh.vertices
+        if len(verts) == 0:
+            return [[0.0, 0.0]]
+
         max_z = np.max(verts[:, 2])
-        # Find all vertices at roughly the max height (1m tolerance)
-        peak_mask = verts[:, 2] > (max_z - 1.0)
+
+        # 1. Base Cores: Must be at maximum height to reach the roof
+        peak_mask = verts[:, 2] > (max_z - 0.5)
         peak_verts = verts[peak_mask]
         
-        # Return unique X, Y coordinates for these peak points
-        # Clustering would be better, but for now take the average of local maxima
-        return [[float(np.mean(peak_verts[:, 0])), float(np.mean(peak_verts[:, 1]))]]
+        clusters = []
+        for v in peak_verts:
+            pt = np.array([v[0], v[1]])
+            added = False
+            for c in clusters:
+                if np.linalg.norm(c["center"] - pt) < 60.96:
+                    c["points"].append(pt)
+                    c["center"] = np.mean(c["points"], axis=0)
+                    added = True
+                    break
+            if not added:
+                clusters.append({"points": [pt], "center": pt})
+
+        core_centers = [c["center"] for c in clusters]
+
+        # 2. 200ft Distance Rule Enforcement
+        # Check all vertices. If any vertex is > 60.96m from ALL existing cores,
+        # we must add a new core. (We'll use a crude clustering for missing coverage)
+
+        uncovered_pts = []
+        for v in verts:
+            pt = np.array([v[0], v[1]])
+            # Compute distance to all cores
+            min_dist = min([np.linalg.norm(core - pt) for core in core_centers]) if core_centers else float('inf')
+
+            if min_dist > 60.96:
+                uncovered_pts.append(pt)
+
+        if uncovered_pts:
+            # Cluster the uncovered points to form new cores
+            new_clusters = []
+            for pt in uncovered_pts:
+                added = False
+                for c in new_clusters:
+                    if np.linalg.norm(c["center"] - pt) < 60.96:
+                        c["points"].append(pt)
+                        c["center"] = np.mean(c["points"], axis=0)
+                        added = True
+                        break
+                if not added:
+                    new_clusters.append({"points": [pt], "center": pt})
+
+            for c in new_clusters:
+                core_centers.append(c["center"])
+
+        return [[float(center[0]), float(center[1])] for center in core_centers]
 
     def sample_internal_nodes(self, grid_spacing=5.0):
         """
@@ -143,16 +192,30 @@ class GeometryEngine:
         print(f"Sampled {len(internal_points)} internal nodes within mesh volume.")
         return internal_points.tolist()
 
-    def generate_solid_structure(self, graph):
+    def generate_solid_structure(self, graph, node_displacements=None):
         """
         Generate a solid 3D mesh (trimesh.Trimesh) by extruding cylinders 
         along each graph edge. Radius is derived from section area.
+        Also attaches vertex colors based on displacement if provided.
         """
         from config import SECTIONS
         import networkx as nx
         
         all_meshes = []
         
+        # Determine max displacement for normalization
+        max_disp = 0
+        if node_displacements:
+            max_disp = max(node_displacements.values()) if node_displacements.values() else 0
+
+        def get_color(disp, max_d):
+            if max_d <= 0: return [255, 255, 255, 255]
+            ratio = disp / max_d
+            # Blue (0) to Red (1)
+            r = int(ratio * 255)
+            b = int((1 - ratio) * 255)
+            return [r, 0, b, 255]
+
         for u, v, data in graph.edges(data=True):
             p1 = np.array(graph.nodes[u]["coords"])
             p2 = np.array(graph.nodes[v]["coords"])
@@ -165,7 +228,7 @@ class GeometryEngine:
                     break
             
             area_m2 = area_in2 * 6.4516e-4
-            radius = np.sqrt(area_m2 / np.pi)
+            radius = np.sqrt(area_m2 / np.pi) * 2.0 # Scale up slightly for visibility
             
             edge_vec = p2 - p1
             length = np.linalg.norm(edge_vec)
@@ -174,7 +237,7 @@ class GeometryEngine:
             cylinder = trimesh.creation.cylinder(radius=radius, height=length)
             
             z_axis = [0, 0, 1]
-            rotation, _ = trimesh.geometry.align_vectors(z_axis, edge_vec)
+            rotation = trimesh.geometry.align_vectors(z_axis, edge_vec)
             
             midpoint = (p1 + p2) / 2.0
             matrix = np.eye(4)
@@ -182,6 +245,15 @@ class GeometryEngine:
             matrix[:3, 3] = midpoint
             
             cylinder.apply_transform(matrix)
+
+            # Apply colors based on displacement of nodes
+            if node_displacements:
+                d_u = node_displacements.get(str(u), 0.0)
+                d_v = node_displacements.get(str(v), 0.0)
+                d_avg = (d_u + d_v) / 2.0
+                color = get_color(d_avg, max_disp)
+                cylinder.visual.vertex_colors = [color for _ in cylinder.vertices]
+
             all_meshes.append(cylinder)
             
         if not all_meshes:

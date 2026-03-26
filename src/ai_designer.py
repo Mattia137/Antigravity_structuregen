@@ -122,7 +122,7 @@ OUTPUT: Return ONLY JSON:
             # Validate that primary nodes are present in the output
             if not result.get("nodes") or len(result["nodes"]) < len(primary_nodes):
                 print(f"Gemini response missing primary nodes for {optimization_goal}. Falling back.")
-                return self._geometric_fallback(geometry_data)
+                return self._geometric_fallback(geometry_data, optimization_goal)
             return result
         except Exception as e:
             import traceback
@@ -130,7 +130,7 @@ OUTPUT: Return ONLY JSON:
                 f.write(f"\nAPI Error during {optimization_goal} generation:\n")
                 f.write(traceback.format_exc())
             print(f"Gemini API failed for {optimization_goal}: {e}. Using geometric fallback.")
-            return self._geometric_fallback(geometry_data)
+            return self._geometric_fallback(geometry_data, optimization_goal)
 
     def request_variants(self, geometry_data: dict) -> list:
         """
@@ -143,7 +143,7 @@ OUTPUT: Return ONLY JSON:
             variants.append(design)
         return variants
 
-    def _geometric_fallback(self, geometry_data: dict) -> dict:
+    def _geometric_fallback(self, geometry_data: dict, optimization_goal: str = "BALANCED") -> dict:
         """
         Fallback when Gemini is unavailable.
         Assigns sections to every primary edge. Adds centroid stabilisers only
@@ -167,11 +167,22 @@ OUTPUT: Return ONLY JSON:
 
         nodes = [{"id": n["id"], "x": n["x"], "y": n["y"], "z": n["z"]} for n in primary_nodes]
 
+        # Different default sections depending on the optimization goal
+        if optimization_goal == "COST":
+            crease_sec = "W12x50"
+            lattice_sec = "Tubular_HSS_4x4x1/4"
+        elif optimization_goal == "CARBON":
+            crease_sec = "IPE_300"
+            lattice_sec = "HEA_200"
+        else: # BALANCED
+            crease_sec = "W14x90"
+            lattice_sec = "W8x31"
+
         # Assign sections based on edge type
         edges = []
         for e in primary_edges:
             etype = e.get("type", "secondary_lattice")
-            section = "IPE_300" if etype == "primary_crease" else "HEA_200"
+            section = crease_sec if etype == "primary_crease" else lattice_sec
             edges.append({
                 "source": e["source"], "target": e["target"],
                 "type": etype, "section": section, "connection": "fixed"
@@ -179,8 +190,8 @@ OUTPUT: Return ONLY JSON:
 
         arr = _np.array([[n["x"], n["y"], n["z"]] for n in nodes])
 
-        # Only add centroid stabilisers when the primary structure is sparse
-        if len(nodes) < 20:
+        # Add centroid stabilisers if sparse
+        if len(nodes) < 50:
             nid = max(n["id"] for n in nodes) + 1
             z_vals = _np.round(arr[:, 2], 1)
             for z_level in _np.unique(z_vals):
@@ -195,7 +206,7 @@ OUTPUT: Return ONLY JSON:
                 for fid in floor_ids:
                     edges.append({
                         "source": fid, "target": nid,
-                        "type": "secondary_lattice", "section": "HEA_200", "connection": "fixed"
+                        "type": "secondary_lattice", "section": lattice_sec, "connection": "fixed"
                     })
                 nid += 1
 
@@ -207,7 +218,7 @@ OUTPUT: Return ONLY JSON:
             e["typology"] = "welded" if e["type"] == "primary_crease" else "hinge"
             final_edges.append(e)
 
-        return {"nodes": nodes, "edges": final_edges, "cores": cores}
+        return {"nodes": nodes, "edges": final_edges, "cores": cores, "optimization_goal": optimization_goal}
 
     def _generic_cube_fallback(self) -> dict:
         """Ultra-fallback: simple 3D frame when no geometry is available."""
