@@ -226,8 +226,15 @@ def evaluate():
         for idx, v in enumerate(variant_results):
             output_variants[idx]["_graph"] = v["graph"]
 
+        # Create a copy of output_variants without the graph objects for JSON serialization
+        json_output_variants = []
+        for variant in output_variants:
+            v_copy = variant.copy()
+            v_copy.pop("_graph", None)
+            json_output_variants.append(v_copy)
+
         return jsonify({
-            'variants': output_variants,
+            'variants': json_output_variants,
             'nodes':   primary_variant['nodes'],
             'members': primary_variant['members'],
             'metrics': primary_variant['metrics'],
