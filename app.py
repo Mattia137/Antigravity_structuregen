@@ -117,46 +117,52 @@ if uploaded_mesh is not None:
                 ai = AIDesigner()
                 optimizer = EvolutionaryOptimizer(ai)
                 final_graph, best_results = optimizer.run_optimization_loop(base_geom, material_params, max_iterations=3)
+                # Store local optimization variants in session state if available
+                if final_graph and hasattr(final_graph, "graph") and "variants" in final_graph.graph:
+                    st.session_state.variants = final_graph.graph["variants"]
+
             status.update(label="AI Optimization Complete.", state="complete")
             
-        if final_graph:
+        if final_graph or "variants" in st.session_state:
             # --- DASHBOARD METRICS ---
             st.header("Structural Performance Dashboard")
+            col1, col2, col3 = st.columns(3)
             
-            # Simple volume/mass heuristic for the prototype
-            # Primary structural elements
-            total_length = 0.0
-            for u, v, data in final_graph.edges(data=True):
-                coord_u = np.array(final_graph.nodes[u]["coords"])
-                coord_v = np.array(final_graph.nodes[v]["coords"])
-                total_length += np.linalg.norm(coord_u - coord_v)
+            if final_graph and not "variants" in st.session_state:
+                # Simple volume/mass heuristic for the prototype
+                # Primary structural elements
+                total_length = 0.0
+                for u, v, data in final_graph.edges(data=True):
+                    coord_u = np.array(final_graph.nodes[u]["coords"])
+                    coord_v = np.array(final_graph.nodes[v]["coords"])
+                    total_length += np.linalg.norm(coord_u - coord_v)
+
+                total_volume = total_length * 0.05 # average section area approx 0.05 m^2
+                total_mass = total_volume * rho # kg
                 
-            total_volume = total_length * 0.05 # average section area approx 0.05 m^2
-            total_mass = total_volume * rho # kg
-            
-            # Knowledge Base Mapping
-            if mat_type == "Steel":
-                total_carbon = total_mass * 1.22
-                total_cost = (total_mass / 1000) * 2653.0
-            else:
-                total_carbon = total_mass * 0.20
-                total_cost = (total_mass / 1833) * 145.0
-                
-            col1.metric("Total Mass", f"{total_mass:,.0f} kg")
-            col2.metric("Embodied Carbon (A1-A3)", f"{total_carbon:,.0f} kgCO2e")
-            col3.metric("Material Cost", f"${total_cost:,.2f}")
+                # Knowledge Base Mapping
+                if mat_type == "Steel":
+                    total_carbon = total_mass * 1.22
+                    total_cost = (total_mass / 1000) * 2653.0
+                else:
+                    total_carbon = total_mass * 0.20
+                    total_cost = (total_mass / 1833) * 145.0
+
+                col1.metric("Total Mass", f"{total_mass:,.0f} kg")
+                col2.metric("Embodied Carbon (A1-A3)", f"{total_carbon:,.0f} kgCO2e")
+                col3.metric("Material Cost", f"${total_cost:,.2f}")
                 
             # --- PLOTLY VISUALIZATION ---
             st.header("3D Rendering")
             
             # Variant Selection (if available)
-            if "variants" in st.session_state:
+            selected_v_name = "BALANCED" # default fallback
+            if "variants" in st.session_state and st.session_state.variants:
                 v_names = [v["name"] for v in st.session_state.variants]
                 selected_v_name = st.radio("Select Optimization Variant", v_names, horizontal=True)
                 selected_variant = next(v for v in st.session_state.variants if v["name"] == selected_v_name)
                 
                 # Update metrics with selected variant data
-                col1, col2, col3 = st.columns(3)
                 col1.metric("Mass", f"{selected_variant['metrics']['Volume'] * rho:,.0f} kg")
                 col2.metric("Carbon", f"{selected_variant['metrics']['Carbon_kgCO2e']:,.0f} kgCO2e")
                 col3.metric("Cost", f"${selected_variant['metrics']['Cost_USD']:,.0f}")
@@ -164,12 +170,14 @@ if uploaded_mesh is not None:
                 # Use variant nodes and members for plotting
                 active_nodes = selected_variant["nodes"]
                 active_members = selected_variant["members"]
+                if not final_graph and "graph" in selected_variant:
+                    final_graph = selected_variant["graph"]
             else:
                 active_nodes = {str(n): {"x": coords[0], "y": coords[1], "z": coords[2]} for n, coords in final_graph.nodes(data="coords")}
                 active_members = [{"from": str(u), "to": str(v), "disp_i": 0, "disp_j": 0} for u, v in final_graph.edges()]
 
             # --- RESULTS TABLE & DIAGRAM ---
-            if "variants" in st.session_state:
+            if "variants" in st.session_state and st.session_state.variants:
                 st.header("Optimization Comparison")
                 colA, colB = st.columns([1, 1.5])
                 
@@ -211,38 +219,100 @@ if uploaded_mesh is not None:
                     fig_diag.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), showlegend=True)
                     st.plotly_chart(fig_diag, use_container_width=True)
 
-            edge_x = []
-            edge_y = []
-            edge_z = []
-            colors = []
-            
-            for m in active_members:
-                u, v = m["from"], m["to"]
-                cu = [active_nodes[u]["x"], active_nodes[u]["y"], active_nodes[u]["z"]]
-                cv = [active_nodes[v]["x"], active_nodes[v]["y"], active_nodes[v]["z"]]
-                edge_x.extend([cu[0], cv[0], None])
-                edge_y.extend([cu[1], cv[1], None])
-                edge_z.extend([cu[2], cv[2], None])
-                
-                if displacement_heatmap:
-                    # Use actual displacement if available
-                    di = m.get("disp_i", 0)
-                    dj = m.get("disp_j", 0)
-                    colors.extend([di, dj, (di+dj)/2])
-                else:
-                    colors.extend([1, 1, 1])
-                    
+            # Build node displacements mapping if heatmap is active
+            node_displacements = None
             if displacement_heatmap:
-                line_marker = dict(color=colors, width=4, colorscale='Bluered', showscale=True, colorbar=dict(title="Displacement Heatmap"))
-            else:
-                line_marker = dict(color='black', width=3)
+                node_displacements = {}
+                for m in active_members:
+                    node_displacements[m["from"]] = m.get("disp_i", 0.0)
+                    node_displacements[m["to"]] = m.get("disp_j", 0.0)
+
+            # Re-generate solid structure for the selected variant
+            # Since the graph object might not be cleanly saved in session state for Streamlit,
+            # we check if we have the active graph.
+            # In our local run_optimization_loop, the variants are saved to final_graph.graph["variants"]
+            active_graph = None
+            if hasattr(final_graph, "graph") and "variants" in final_graph.graph:
+                v_selected = next(v for v in final_graph.graph["variants"] if v["name"] == (selected_v_name if "variants" in st.session_state else "BALANCED"))
+                active_graph = v_selected.get("graph")
+
+            if active_graph is None:
+                active_graph = final_graph
+
+            from src.geometry_engine import GeometryEngine
+            import trimesh
+            import plotly.colors as pc
+            
+            solid_mesh = None
+            # Extract displacements locally if we have active_graph
+            node_disp_for_mesh = node_displacements
+
+            ge_temp = GeometryEngine.__new__(GeometryEngine)
+            solid_mesh = ge_temp.generate_solid_structure(active_graph, node_displacements=node_disp_for_mesh)
+
+            fig = go.Figure()
+
+            if solid_mesh and isinstance(solid_mesh, trimesh.Trimesh):
+                vertices = solid_mesh.vertices
+                faces = solid_mesh.faces
+                x = vertices[:, 0].tolist()
+                y = vertices[:, 1].tolist()
+                z = vertices[:, 2].tolist()
+                i = faces[:, 0].tolist()
+                j = faces[:, 1].tolist()
+                k = faces[:, 2].tolist()
                 
-            fig = go.Figure(data=go.Scatter3d(
-                x=edge_x, y=edge_y, z=edge_z,
-                mode='lines',
-                line=line_marker,
-                hoverinfo='none'
-            ))
+                # If displacement_heatmap, solid_mesh generated colors. Extract them
+                if displacement_heatmap and hasattr(solid_mesh.visual, 'vertex_colors') and len(solid_mesh.visual.vertex_colors) > 0:
+                    v_colors = solid_mesh.visual.vertex_colors
+                    # convert rgba array to hex strings
+                    color_vals = [f"rgb({c[0]}, {c[1]}, {c[2]})" for c in v_colors]
+                    fig.add_trace(go.Mesh3d(
+                        x=x, y=y, z=z,
+                        i=i, j=j, k=k,
+                        vertexcolor=color_vals,
+                        flatshading=False,
+                        hoverinfo='none'
+                    ))
+                else:
+                    fig.add_trace(go.Mesh3d(
+                        x=x, y=y, z=z,
+                        i=i, j=j, k=k,
+                        color='black' if not render_mode == "Solid" else 'lightgrey',
+                        flatshading=True,
+                        hoverinfo='none'
+                    ))
+            else:
+                # Fallback to lines if solid generation fails
+                edge_x = []
+                edge_y = []
+                edge_z = []
+                colors = []
+                
+                for m in active_members:
+                    u, v = m["from"], m["to"]
+                    cu = [active_nodes[u]["x"], active_nodes[u]["y"], active_nodes[u]["z"]]
+                    cv = [active_nodes[v]["x"], active_nodes[v]["y"], active_nodes[v]["z"]]
+                    edge_x.extend([cu[0], cv[0], None])
+                    edge_y.extend([cu[1], cv[1], None])
+                    edge_z.extend([cu[2], cv[2], None])
+
+                    if displacement_heatmap:
+                        di = m.get("disp_i", 0)
+                        dj = m.get("disp_j", 0)
+                        colors.extend([di, dj, (di+dj)/2])
+
+                if displacement_heatmap:
+                    line_marker = dict(color=colors, width=4, colorscale='Bluered', showscale=True)
+                else:
+                    line_marker = dict(color='black', width=3)
+
+                fig.add_trace(go.Scatter3d(
+                    x=edge_x, y=edge_y, z=edge_z,
+                    mode='lines',
+                    line=line_marker,
+                    hoverinfo='none'
+                ))
             
             fig.update_layout(
                 paper_bgcolor='rgba(0,0,0,0)',
