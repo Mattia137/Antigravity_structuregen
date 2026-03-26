@@ -44,7 +44,7 @@ scene.add(structureGroup);
 // ═══════════════════════════════════════════
 // OBJ MESH LOADER
 // ═══════════════════════════════════════════
-let currentMeshUrl = 'mass-DEF.obj';
+let currentMeshUrl = '/mesh/mass-DEF.obj';
 
 function loadMesh(url) {
     // Remove old mesh

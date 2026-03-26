@@ -1,7 +1,14 @@
 from flask import Flask, jsonify, request, send_from_directory, send_file
 from flask_cors import CORS
-import json, os, sys, traceback
+import json, os, sys, traceback, math
 import numpy as np
+
+def _safe_float(v, fallback=0.0):
+    """Return fallback if v is NaN or infinite (JSON doesn't support those)."""
+    try:
+        return fallback if (math.isnan(v) or math.isinf(v)) else float(v)
+    except Exception:
+        return fallback
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -119,7 +126,7 @@ def evaluate():
                 f.write("AI generative loop returned 0 nodes.\n")
             return jsonify({'error': 'AI generative loop failed to produce graph nodes.'}), 500
 
-        max_disp = best_results.get("max_displacement", 0.001) if best_results else 0.01
+        max_disp = _safe_float(best_results.get("max_displacement", 0.001) if best_results else 0.01)
         # Per-node FEA displacements for visualization gradient
         node_disps = best_results.get("node_displacements", {}) if best_results else {}
 
@@ -147,8 +154,8 @@ def evaluate():
         total_length += member_len
 
         # Use actual FEA nodal displacements (normalised 0-1 for colour gradient)
-        disp_i = node_disps.get(str(u), 0.0) / max_disp_val
-        disp_j = node_disps.get(str(v), 0.0) / max_disp_val
+        disp_i = _safe_float(node_disps.get(str(u), 0.0) / max_disp_val)
+        disp_j = _safe_float(node_disps.get(str(v), 0.0) / max_disp_val)
 
         members_out.append({
             "id": f"m_{edge_idx}",
@@ -174,14 +181,14 @@ def evaluate():
 
     return jsonify({
         'metrics': {
-            'Carbon_kgCO2e': round(total_carbon, 0),
-            'Cost_USD': round(total_cost, 0),
-            'Volume': round(total_volume, 2),
-            'Max_Disp': round(max_disp, 4)
+            'Carbon_kgCO2e': _safe_float(round(total_carbon, 0)),
+            'Cost_USD': _safe_float(round(total_cost, 0)),
+            'Volume': _safe_float(round(total_volume, 2)),
+            'Max_Disp': _safe_float(round(max_disp, 4))
         },
         'nodes': nodes_out,
         'members': members_out,
-        'max_disp': max_disp,
+        'max_disp': _safe_float(max_disp),
         'unit': 'm'
     })
 
