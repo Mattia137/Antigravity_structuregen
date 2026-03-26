@@ -11,6 +11,13 @@ from src.fea_solver import FEASolver
 
 st.set_page_config(page_title="Generative Structural Exoskeleton", layout="wide")
 
+try:
+    with open("static/style.css", "r") as f:
+        css = f.read()
+        st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+except Exception:
+    pass
+
 # --- UI PARAMETER BLOCK (MANDATORY) ---
 with st.sidebar:
     st.header("Parameter Block")
@@ -143,10 +150,13 @@ if uploaded_mesh is not None:
             ))
             
             fig.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(family="Fragment Mono, monospace", color="rgba(255,255,255,0.85)"),
                 scene=dict(
-                    xaxis=dict(showbackground=False),
-                    yaxis=dict(showbackground=False),
-                    zaxis=dict(showbackground=False),
+                    xaxis=dict(showbackground=False, visible=False),
+                    yaxis=dict(showbackground=False, visible=False),
+                    zaxis=dict(showbackground=False, visible=False),
                     camera=dict(projection=dict(type=projection))
                 ),
                 margin=dict(l=0, r=0, b=0, t=0),
