@@ -82,16 +82,18 @@ class FEASolver:
         # Add nodes
         # Blender OBJ exports Y-up: Y = height (vertical), Z = depth
         min_y = float('inf')
+        max_y = float('-inf')
         for node_id, data in self.graph.nodes(data=True):
             coords = data["coords"]
             self.model.add_node(str(node_id), coords[0], coords[1], coords[2])
             if coords[1] < min_y:
                 min_y = coords[1]
+            if coords[1] > max_y:
+                max_y = coords[1]
 
         # Fixed supports at the lowest Y level (foundation / ground floor)
         # Use a 10% of total height tolerance to catch all ground nodes
-        y_vals = [data["coords"][1] for _, data in self.graph.nodes(data=True)]
-        y_range = max(y_vals) - min_y if y_vals else 1.0
+        y_range = (max_y - min_y) if max_y != float('-inf') else 1.0
         tol = max(0.5, y_range * 0.05)
         for node_id, data in self.graph.nodes(data=True):
             if abs(data["coords"][1] - min_y) < tol:
