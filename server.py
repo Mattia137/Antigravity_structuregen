@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request, send_from_directory, send_file
 from flask_cors import CORS
-import json, os, sys
+import json, os, sys, traceback
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -48,29 +48,44 @@ def evaluate():
     }
 
     # STEP 1: Geometry Extraction (Phase 2)
-    # Using 'mass-DEF.obj' as default payload mock unless file handling is provided
     try:
         ge = GeometryEngine('mass-DEF.obj')
+        raw_verts = ge.extract_boundary_nodes()
+        safe_verts = raw_verts[::max(1, len(raw_verts) // 80)] # aggressive decimation
+        
+        creases = ge.extract_primary_creases()
+        safe_edges = creases["edges"][:150]
+        
         base_geom = {
-            "vertices": ge.extract_boundary_nodes(),
-            "creases": ge.extract_primary_creases(),
+            "vertices": safe_verts,
+            "creases": {"edges": safe_edges, "nodes": creases["nodes"]},
             "sqft_data": ge.slice_mesh_horizontally()
         }
     except Exception as e:
+        with open("crash.log", "w") as f:
+            f.write(traceback.format_exc())
         print(f"Geometry Extraction error: {e}")
         base_geom = {"vertices": [[0,0,0], [10,0,0], [10,10,0], [0,10,0], [0,0,10], [10,0,10], [10,10,10], [0,10,10]]}
 
-    # STEP 2: Generative Optimizer (Phase 3 & 5)
-    ai = AIDesigner()
-    opt = EvolutionaryOptimizer(ai)
-    
-    # We run 1 max iteration to prevent Hugging Face's 60-second proxy timeout latency
-    final_graph, best_results = opt.run_optimization_loop(base_geom, material_params, max_iterations=1)
-    
-    if not final_graph or final_graph.number_of_nodes() == 0:
-        return jsonify({'error': 'AI generative loop failed to produce graph nodes.'}), 500
+    try:
+        # STEP 2: Generative Optimizer (Phase 3 & 5)
+        ai = AIDesigner()
+        opt = EvolutionaryOptimizer(ai)
         
-    max_disp = best_results.get("max_displacement", 0.001) if best_results else 0.01
+        # We run 1 max iteration to prevent Hugging Face's 60-second proxy timeout latency
+        final_graph, best_results = opt.run_optimization_loop(base_geom, material_params, max_iterations=1)
+        
+        if not final_graph or final_graph.number_of_nodes() == 0:
+            with open("crash.log", "w") as f:
+                f.write("AI generative loop returned 0 nodes. Likely Gemini token limit or hallucination.")
+            return jsonify({'error': 'AI generative loop failed to produce graph nodes.'}), 500
+            
+        max_disp = best_results.get("max_displacement", 0.001) if best_results else 0.01
+
+    except Exception as e:
+        with open("crash.log", "w") as f:
+            f.write(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
 
     # STEP 3: Mapping back to Frontend format
     nodes_out = {}
