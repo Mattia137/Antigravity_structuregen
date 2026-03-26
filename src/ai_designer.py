@@ -57,6 +57,9 @@ class AIDesigner:
             )
             return json.loads(response.text)
         except Exception as e:
+            import traceback
+            with open("ai_crash.log", "w") as f:
+                f.write(traceback.format_exc())
             print(f"Failed to generate AI structural design: {e}")
             # Fallback mock schema for testing resilience
             return {"nodes": [], "edges": [], "cores": []}

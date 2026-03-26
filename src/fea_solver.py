@@ -35,6 +35,10 @@ class FEASolver:
             "secondary_lattice": {"A": 0.01, "Iy": 0.0001, "Iz": 0.0001, "J": 0.0002}
         }
         
+        # Register named sections with the model (required by current PyNite API)
+        for sec_name, props in self.section_props.items():
+            self.model.add_section(sec_name, props["A"], props["Iy"], props["Iz"], props["J"])
+        
     def build_model(self):
         """
         Populates the FEA model with nodes and members from the structural graph.
@@ -57,10 +61,11 @@ class FEASolver:
         for u, v, data in self.graph.edges(data=True):
             member_id += 1
             section_type = data.get("section_type", "secondary_lattice")
-            props = self.section_props.get(section_type, self.section_props["secondary_lattice"])
+            # Ensure section_type matches a registered section name
+            if section_type not in self.section_props:
+                section_type = "secondary_lattice"
             
-            self.model.add_member(str(member_id), str(u), str(v), mat_name, 
-                                  props["Iy"], props["Iz"], props["J"], props["A"])
+            self.model.add_member(str(member_id), str(u), str(v), mat_name, section_type)
 
     def apply_loads(self, gravity=9.81):
         """
@@ -71,9 +76,9 @@ class FEASolver:
         # Dead Load (Self-weight)
         rho_n = self.material.get("rho", 7850) * gravity # specific weight in N/m^3
         
-        for member_name, member in self.model.Members.items():
+        for member_name, member in self.model.members.items():
             # Uniform downward load in N/m based on Volume / L = Area
-            area = member.A
+            area = member.section.A
             dist_load = rho_n * area 
             # In PyNite, uniform distributed load on global Z takes negative for downward
             try:
@@ -82,7 +87,7 @@ class FEASolver:
                 pass # Depending on version, method signatures differ
                 
         # Live and Lateral Load simplifications
-        for node_id, node in self.model.Nodes.items():
+        for node_id, node in self.model.nodes.items():
             if node.Z > 1.0:
                 # Seismic LA loads mimicking ELF distribution (heavier at top)
                 lateral_force = 500 * node.Z 
@@ -108,7 +113,7 @@ class FEASolver:
         max_disp = 0.0
         
         # Vectorized displacement check to extract max nodal limits
-        for node_id, node in self.model.Nodes.items():
+        for node_id, node in self.model.nodes.items():
             try:
                 # Check displacement magnitude
                 # Depending on version: node.DX['D+L+E']
@@ -122,7 +127,7 @@ class FEASolver:
                 pass
                 
         # Check L/360 limit per member
-        for member_name, member in self.model.Members.items():
+        for member_name, member in self.model.members.items():
             L = member.L()
             limit = L / 360.0
             

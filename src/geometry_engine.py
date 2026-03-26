@@ -70,8 +70,9 @@ class GeometryEngine:
                 # Get cross section at elevation z
                 cross_section = self.mesh.section(plane_origin=[0, 0, z], plane_normal=[0, 0, 1])
                 if cross_section is not None:
-                    # area is in m^2 based on an imported model in meters
-                    area_m2 = cross_section.area
+                    # Convert to planar 2D to calculate area safely
+                    planar, _ = cross_section.to_planar()
+                    area_m2 = planar.area
                     area_sqft = area_m2 * 10.7639
                     total_sqft += area_sqft
                     
@@ -80,7 +81,7 @@ class GeometryEngine:
                         "area_sqft": area_sqft
                     })
             except Exception as e:
-                print(f"Warning: Slicing failed at z={z}. Error: {e}")
+                pass
                 
         return {
             "num_floors": len(floors),
