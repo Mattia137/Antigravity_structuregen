@@ -45,6 +45,14 @@ with st.sidebar:
     render_mode = st.radio("Render Mode", ["Wireframe", "Solid"])
     displacement_heatmap = st.checkbox("Toggle Displacement Heatmap", value=True)
 
+# Build parameter dictionary
+material_params = {
+    "type": mat_type,
+    "E": E_mod,
+    "nu": nu,
+    "rho": rho,
+    "alpha": alpha,
+    "Fy": Fy,
     "G": E_mod / (2 * (1 + nu))
 }
 
