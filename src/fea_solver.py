@@ -108,9 +108,25 @@ class FEASolver:
 
             self._ensure_section(section_name, mat_type)
             self.model.add_member(member_name, str(u), str(v), mat_name, section_name)
-            # Note: pinned releases are stored on edges for display/export but not applied
-            # to the FEA model — applying them to all secondary members causes singular
-            # stiffness matrices when interior nodes have only pinned members meeting at them.
+
+        # Add Concrete Cores
+        cores = self.graph.graph.get("shear_cores", [])
+        for i, core in enumerate(cores):
+            cx, cy = core["x"], core["y"]
+            # Create vertical nodes for the core at every Z level where other nodes exist
+            z_levels = sorted(list(set(n.Z for n in self.model.nodes.values())))
+            core_node_ids = []
+            for j, z in enumerate(z_levels):
+                nid = f"core_{i}_{j}"
+                self.model.add_node(nid, cx, cy, z)
+                core_node_ids.append(nid)
+                if j == 0: # Foundation
+                    self.model.def_support(nid, True, True, True, True, True, True)
+            
+            # Add members for the core
+            for j in range(len(core_node_ids) - 1):
+                mid = f"core_mem_{i}_{j}"
+                self.model.add_member(mid, core_node_ids[j], core_node_ids[j+1], mat_name, "Core_Massive")
 
     # ------------------------------------------------------------------
     def apply_loads(self, gravity=9.81):

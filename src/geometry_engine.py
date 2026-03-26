@@ -76,9 +76,19 @@ class GeometryEngine:
                     area_sqft = area_m2 * 10.7639
                     total_sqft += area_sqft
                     
+                    # Calculate centroids for core positioning advice
+                    centroid_3d = cross_section.centroid
+                    
                     floors.append({
                         "elevation_z": z,
-                        "area_sqft": area_sqft
+                        "area_sqft": area_sqft,
+                        "centroid": [float(centroid_3d[0]), float(centroid_3d[1])],
+                        "bounds_2d": {
+                            "x_min": float(cross_section.bounds[0][0]),
+                            "x_max": float(cross_section.bounds[1][0]),
+                            "y_min": float(cross_section.bounds[0][1]),
+                            "y_max": float(cross_section.bounds[1][1])
+                        }
                     })
             except Exception as e:
                 pass
@@ -86,8 +96,30 @@ class GeometryEngine:
         return {
             "num_floors": len(floors),
             "total_sqft": total_sqft,
-            "floors": floors
+            "floors": floors,
+            "avg_floor_area": total_sqft / len(floors) if floors else 0
         }
+
+    def sample_internal_nodes(self, grid_spacing=5.0):
+        """
+        Generate a 3D grid of points within the mesh volume.
+        Used to provide Gemini with anchor points for internal structural networks.
+        """
+        bounds = self.mesh.bounds
+        x_range = np.arange(bounds[0][0], bounds[1][0], grid_spacing)
+        y_range = np.arange(bounds[0][1], bounds[1][1], grid_spacing)
+        z_range = np.arange(bounds[0][2], bounds[1][2], grid_spacing)
+        
+        # Create 3D grid
+        xv, yv, zv = np.meshgrid(x_range, y_range, z_range)
+        points = np.vstack([xv.ravel(), yv.ravel(), zv.ravel()]).T
+        
+        # Filter points that are actually inside the mesh
+        inside_mask = self.mesh.contains(points)
+        internal_points = points[inside_mask]
+        
+        print(f"Sampled {len(internal_points)} internal nodes within mesh volume.")
+        return internal_points.tolist()
 
 if __name__ == "__main__":
     # Example usage / test stub

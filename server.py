@@ -167,9 +167,12 @@ def evaluate():
             etype = "primary_crease" if tuple(sorted([u, v_idx])) in crease_set else "secondary_lattice"
             primary_edges.append({"source": u, "target": v_idx, "type": etype})
 
+        internal_nodes = ge.sample_internal_nodes(grid_spacing=8.0) # meter spacing
+
         base_geom = {
             "primary_nodes": primary_nodes,
             "primary_edges": primary_edges,
+            "internal_nodes": internal_nodes,
             "sqft_data": ge.slice_mesh_horizontally(),
             "bounds": {
                 "x_min": float(all_verts[:, 0].min()), "x_max": float(all_verts[:, 0].max()),
@@ -177,9 +180,7 @@ def evaluate():
                 "z_min": float(all_verts[:, 2].min()), "z_max": float(all_verts[:, 2].max()),
             }
         }
-        print(f"Primary structure: {len(primary_nodes)} nodes, {len(primary_edges)} edges "
-              f"({sum(1 for e in primary_edges if e['type']=='primary_crease')} crease, "
-              f"{sum(1 for e in primary_edges if e['type']=='secondary_lattice')} secondary)")
+        print(f"Primary structure: {len(primary_nodes)} nodes, {len(primary_edges)} edges. Internal: {len(internal_nodes)} nodes.")
 
     except Exception as e:
         with open("crash.log", "w") as f:
@@ -199,49 +200,42 @@ def evaluate():
         }
 
     try:
-        # STEP 2: AI Generative Design (1 iteration — stays within 60s proxy timeout)
+        # STEP 2: AI Generative Design (Request 3 Variants directly)
         ai = AIDesigner()
-        opt = EvolutionaryOptimizer(ai)
-        base_graph, base_results = opt.run_optimization_loop(base_geom, material_params, max_iterations=1)
-
-        if not base_graph or base_graph.number_of_nodes() == 0:
-            with open("crash.log", "w") as f:
-                f.write("AI generative loop returned 0 nodes.\n")
-            return jsonify({'error': 'AI generative loop failed to produce graph nodes.'}), 500
-
-        # STEP 3: Generate 3 variants programmatically
-        # Variant A — Minimum Cost & Carbon: downgrade sections 2 steps
-        graph_cost = _scale_graph_sections(base_graph, steps=-2)
-        results_cost = _run_fea(graph_cost, material_params)
-
-        # Variant B — Balanced (base AI design, no section change)
-        results_balanced = base_results
-
-        # Variant C — Minimum Displacement: upgrade sections 2 steps
-        graph_perf = _scale_graph_sections(base_graph, steps=+2)
-        results_perf = _run_fea(graph_perf, material_params)
+        variants_json = ai.request_variants(base_geom)
+        
+        variant_results = []
+        for design in variants_json:
+            graph = ai.construct_graph(design)
+            results = _run_fea(graph, material_params)
+            variant_results.append({
+                "graph": graph,
+                "fea": results,
+                "goal": design.get("optimization_goal", "BALANCED")
+            })
 
     except Exception as e:
         with open("crash.log", "w") as f:
             f.write(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-    # STEP 4: Build response for all 3 variants
-    variant_cost    = _graph_to_response(graph_cost,    results_cost,     material_params, mat_type)
-    variant_balanced = _graph_to_response(base_graph,   results_balanced, material_params, mat_type)
-    variant_perf    = _graph_to_response(graph_perf,    results_perf,     material_params, mat_type)
+    # STEP 3: Build response for all 3 variants
+    output_variants = []
+    for v in variant_results:
+        resp = _graph_to_response(v["graph"], v["fea"], material_params, mat_type)
+        resp["name"] = v["goal"]
+        output_variants.append(resp)
 
-    variant_cost["name"]     = "MIN_COST"
-    variant_balanced["name"] = "BALANCED"
-    variant_perf["name"]     = "MIN_DISP"
+    # Use BALANCED as the default selection for backward compatibility
+    balanced_idx = next((i for i, v in enumerate(output_variants) if v["name"] == "BALANCED"), 0)
+    primary_variant = output_variants[balanced_idx]
 
     return jsonify({
-        'variants': [variant_cost, variant_balanced, variant_perf],
-        # Legacy flat fields — mirrors balanced variant for backwards compat
-        'nodes':   variant_balanced['nodes'],
-        'members': variant_balanced['members'],
-        'metrics': variant_balanced['metrics'],
-        'max_disp': variant_balanced['max_disp'],
+        'variants': output_variants,
+        'nodes':   primary_variant['nodes'],
+        'members': primary_variant['members'],
+        'metrics': primary_variant['metrics'],
+        'max_disp': primary_variant['max_disp'],
         'unit': 'm'
     })
 

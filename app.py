@@ -45,16 +45,13 @@ with st.sidebar:
     render_mode = st.radio("Render Mode", ["Wireframe", "Solid"])
     displacement_heatmap = st.checkbox("Toggle Displacement Heatmap", value=True)
 
-# Build parameter dictionary
-material_params = {
-    "type": mat_type,
-    "E": E_mod,
-    "nu": nu,
-    "rho": rho,
-    "alpha": alpha,
-    "Fy": Fy,
     "G": E_mod / (2 * (1 + nu))
 }
+
+with st.sidebar:
+    st.header("Pipeline Configuration")
+    use_remote = st.toggle("Use Remote Brain (Vercel/HuggingFace Proxy)", value=False)
+    brain_url = st.text_input("Brain API URL", value="http://localhost:5000")
 
 st.title("Generative Engineering Agent: Structural Evolution")
 st.markdown("Ingests massing meshes, applies generative logic for load-paths, and optimizes via PyNite & Gemini.")
@@ -81,10 +78,37 @@ if uploaded_mesh is not None:
             }
             status.update(label="Geometry Extraction Complete.", state="complete")
             
-        with st.status("Executing Phase 3 & 5: AI Evolutionary Optimization...", expanded=True) as status:
-            ai = AIDesigner()
-            optimizer = EvolutionaryOptimizer(ai)
-            final_graph, best_results = optimizer.run_optimization_loop(base_geom, material_params, max_iterations=3)
+        with st.status("Executing AI Evolutionary Optimization...", expanded=True) as status:
+            if use_remote:
+                import requests
+                try:
+                    # In a real scenario, we might upload the mesh here
+                    # For now, we'll send the extracted geometry
+                    payload = {
+                        "material": mat_type,
+                        "geometry": base_geom 
+                    }
+                    response = requests.post(f"{brain_url}/api/evaluate", json=payload)
+                    if response.status_code == 200:
+                        data = response.json()
+                        st.session_state.variants = data["variants"]
+                        # Default to balanced variant for initial display
+                        balanced_variant = next((v for v in data["variants"] if v["name"] == "BALANCED"), data["variants"][0])
+                        final_graph = None # Logic below will handle variants
+                        best_results = balanced_variant["metrics"]
+                        st.success("Remote AI generation successful.")
+                    else:
+                        st.error(f"Remote Brain Error: {response.text}")
+                        final_graph = None
+                        best_results = None
+                except Exception as e:
+                    st.error(f"Failed to connect to Remote Brain: {e}")
+                    final_graph = None
+                    best_results = None
+            else:
+                ai = AIDesigner()
+                optimizer = EvolutionaryOptimizer(ai)
+                final_graph, best_results = optimizer.run_optimization_loop(base_geom, material_params, max_iterations=3)
             status.update(label="AI Optimization Complete.", state="complete")
             
         if final_graph:
@@ -110,7 +134,6 @@ if uploaded_mesh is not None:
                 total_carbon = total_mass * 0.20
                 total_cost = (total_mass / 1833) * 145.0
                 
-            col1, col2, col3 = st.columns(3)
             col1.metric("Total Mass", f"{total_mass:,.0f} kg")
             col2.metric("Embodied Carbon (A1-A3)", f"{total_carbon:,.0f} kgCO2e")
             col3.metric("Material Cost", f"${total_cost:,.2f}")
@@ -118,22 +141,43 @@ if uploaded_mesh is not None:
             # --- PLOTLY VISUALIZATION ---
             st.header("3D Rendering")
             
+            # Variant Selection (if available)
+            if "variants" in st.session_state:
+                v_names = [v["name"] for v in st.session_state.variants]
+                selected_v_name = st.radio("Select Optimization Variant", v_names, horizontal=True)
+                selected_variant = next(v for v in st.session_state.variants if v["name"] == selected_v_name)
+                
+                # Update metrics with selected variant data
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Mass", f"{selected_variant['metrics']['Volume'] * rho:,.0f} kg")
+                col2.metric("Carbon", f"{selected_variant['metrics']['Carbon_kgCO2e']:,.0f} kgCO2e")
+                col3.metric("Cost", f"${selected_variant['metrics']['Cost_USD']:,.0f}")
+                
+                # Use variant nodes and members for plotting
+                active_nodes = selected_variant["nodes"]
+                active_members = selected_variant["members"]
+            else:
+                active_nodes = {str(n): {"x": coords[0], "y": coords[1], "z": coords[2]} for n, coords in final_graph.nodes(data="coords")}
+                active_members = [{"from": str(u), "to": str(v), "disp_i": 0, "disp_j": 0} for u, v in final_graph.edges()]
+
             edge_x = []
             edge_y = []
             edge_z = []
             colors = []
             
-            for u, v, data in final_graph.edges(data=True):
-                cu = final_graph.nodes[u]["coords"]
-                cv = final_graph.nodes[v]["coords"]
+            for m in active_members:
+                u, v = m["from"], m["to"]
+                cu = [active_nodes[u]["x"], active_nodes[u]["y"], active_nodes[u]["z"]]
+                cv = [active_nodes[v]["x"], active_nodes[v]["y"], active_nodes[v]["z"]]
                 edge_x.extend([cu[0], cv[0], None])
                 edge_y.extend([cu[1], cv[1], None])
                 edge_z.extend([cu[2], cv[2], None])
                 
                 if displacement_heatmap:
-                    # Map vertical z location to a simulated structural displacement gradient
-                    z_avg = (cu[2] + cv[2]) / 2.0
-                    colors.extend([z_avg, z_avg, z_avg]) 
+                    # Use actual displacement if available
+                    di = m.get("disp_i", 0)
+                    dj = m.get("disp_j", 0)
+                    colors.extend([di, dj, (di+dj)/2])
                 else:
                     colors.extend([1, 1, 1])
                     

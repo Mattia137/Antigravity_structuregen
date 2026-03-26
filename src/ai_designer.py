@@ -14,7 +14,7 @@ STEEL_SECTIONS = [
 CONCRETE_SECTIONS = ["Rect_16x16", "Circ_16", "Floor_Tie", "Core_Massive"]
 
 class AIDesigner:
-    def __init__(self, manual_path="knowledge_base/structural_manual.md"):
+    def __init__(self, manual_path="knowledge_base/structural_manual.md", research_path="research/structural_patterns.md"):
         """
         Connect to the external Gemini API using the GEMINI_AGENT_01 environment variable.
         """
@@ -26,91 +26,77 @@ class AIDesigner:
             with open(manual_path, "r", encoding="utf-8") as f:
                 self.structural_manual = f.read()
         except FileNotFoundError:
-            self.structural_manual = "Structural engineering manual not found. Defaulting to standard physics."
+            self.structural_manual = "Structural engineering manual not found."
 
-    def request_design(self, geometry_data: dict) -> dict:
+        try:
+            with open(research_path, "r", encoding="utf-8") as f:
+                self.research_patterns = f.read()
+        except FileNotFoundError:
+            self.research_patterns = "No research patterns found."
+
+    def request_design(self, geometry_data: dict, optimization_goal: str = "BALANCED") -> dict:
         """
         Build a Gemini prompt that:
-          1. Takes mesh crease vertices as PRIMARY nodes (coordinates must be preserved exactly).
+          1. Takes mesh crease vertices as PRIMARY nodes.
           2. Takes mesh crease edges as PRIMARY structural members.
-          3. Asks Gemini to add SECONDARY nodes/edges only where structurally necessary.
-          4. Assigns a cross-section and connection type to every edge.
+          3. Uses INTERNAL_NODES as high-density anchor points for a complex lattice.
+          4. Optimizes for the specified goal (COST, CARBON, or BALANCED).
         """
         primary_nodes = geometry_data.get("primary_nodes", [])
         primary_edges = geometry_data.get("primary_edges", [])
+        internal_nodes = geometry_data.get("internal_nodes", [])
         sqft_data = geometry_data.get("sqft_data", {})
         bounds = geometry_data.get("bounds", {})
         feedback = geometry_data.get("optimization_feedback", "")
 
-        # Infer material from feedback context (default Steel)
         section_list = STEEL_SECTIONS
 
         system_prompt = f"""You are the Lead Computational Structural Engineer performing generative structural design.
+        
+GOAL: Optimize for {optimization_goal}
+- COST: Minimize total material weight and connection complexity.
+- CARBON: Prioritize low-carbon sections and efficient geometries.
+- BALANCED: Professional trade-off between displacement and footprint.
 
 KNOWLEDGE BASE:
 {self.structural_manual}
 
+RESEARCH PATTERNS:
+{self.research_patterns}
+
 ---
 WORKFLOW:
-
 You receive:
-- "primary_nodes": nodes extracted from mesh crease vertices — these are the PRIMARY structural nodes.
-  Their (x, y, z) coordinates are EXACT and must NOT be modified.
-- "primary_edges": edges extracted from mesh crease lines — these are the PRIMARY structural members.
-- "sqft_data": floor area data.
-- "bounds": overall mesh extents (meters).
-- "optimization_feedback": FEA results from the previous iteration (empty on first run).
+- "primary_nodes": coordinates of mesh vertices (EXACT).
+- "primary_edges": mesh crease lines (PRIMARY frame).
+- "internal_nodes": sampled 3D points INSIDE the volume for high-density lattice anchors.
+- "sqft_data": floor area and centroids.
+- "optimization_feedback": FEA results for iteration.
 
-YOUR TASKS:
+TASKS:
+1. PRESERVE PRIMARY STRUCTURE: Keep all primary_nodes and primary_edges.
+2. REARRANGE & EXPAND:
+   - Rearrange non-crease edges to optimize load paths.
+   - Add nodes from "internal_nodes" to create a complex internal structural network.
+   - Triangulate for global stability (see "Triangulation" in research patterns).
+3. ASSIGN SECTIONS: Choose from {section_list} based on manual rules.
+4. PLACE CONCRETE CORES: 
+   - Min 1.5% GFA. 
+   - Position based on plan centroids in sqft_data.
+   - Aspect ratio 4:1 to 8:1.
 
-TASK 1 — PRESERVE PRIMARY STRUCTURE (mandatory):
-  • Output ALL primary_nodes with their EXACT coordinates (copy id, x, y, z verbatim).
-  • Output ALL primary_edges as type "primary_crease".
-
-TASK 2 — ADD SECONDARY STRUCTURE (add only what is structurally necessary):
-  • Evaluate the primary topology for:
-      - Unbraced column lengths > L/360 serviceability limit
-      - Missing lateral / X-bracing between floors
-      - Out-of-plane instability zones
-      - Local buckling risks in long primary members
-  • If needed, add new secondary nodes (IDs starting after the last primary node ID)
-    and secondary_lattice edges to address these issues.
-  • Minimise secondary additions — only add what is required.
-
-TASK 3 — ASSIGN CROSS-SECTIONS (every edge must have a "section"):
-  Choose from this list only: {section_list}
-
-  Assignment rules (IBC 2024 / AISC 360-22):
-  - Vertical/near-vertical primary columns (tall or high axial): W14x283 or W14x159
-  - Medium columns or raking members: W14x90 or W18x97
-  - Long horizontal beams (span > 9m): W24x146 or W18x97
-  - Medium beams (span 5-9m): W12x53 or W12x50
-  - Short beams / ties (span < 5m): W8x31 or IPE_300
-  - Large perimeter diagonal braces: HSS16x0.625 or HSS12x12x0.625
-  - Medium diagonal braces: HSS10x0.500 or HSS8x8x0.500
-  - Light secondary lattice / bracing: HEA_200, HSS6x0.500, or Tubular_HSS_4x4x1/4
-  - Assign heavier sections at high-connectivity nodes (degree >= 4) and long spans.
-
-TASK 4 — ASSIGN CONNECTION TYPES (every edge must have a "connection"):
-  - "fixed": moment-resisting connection — use for beams, continuous columns, moment frames
-  - "pinned": pin/truss connection — use for bracing members, secondary lattice, short ties
-
-TASK 5 — SHEAR CORE PLACEMENT:
-  Place LABC-compliant concrete shear cores per the knowledge base rules (centralized, C-shape around service cores).
-
-{f"OPTIMIZATION FEEDBACK FROM PREVIOUS FEA RUN: {feedback}" if feedback else ""}
-
-OUTPUT: Return ONLY this JSON (no markdown, no extra text):
+OUTPUT: Return ONLY JSON:
 {{
   "nodes": [{{"id": int, "x": float, "y": float, "z": float}}],
   "edges": [{{"source": int, "target": int, "type": "primary_crease|secondary_lattice", "section": "string", "connection": "fixed|pinned"}}],
-  "cores": [{{"x": float, "y": float, "thickness": float}}]
+  "cores": [{{"x": float, "y": float, "thickness": float, "width": float, "depth": float}}]
 }}
 """
 
         user_message = (
             f"PRIMARY NODES ({len(primary_nodes)} nodes):\n{json.dumps(primary_nodes)}\n\n"
             f"PRIMARY EDGES ({len(primary_edges)} edges):\n{json.dumps(primary_edges)}\n\n"
+            f"INTERNAL NODES ({len(internal_nodes)} sample points):\n{json.dumps(internal_nodes[:100])}\n\n"
             f"SQFT DATA: {json.dumps(sqft_data)}\n"
             f"BOUNDS: {json.dumps(bounds)}"
         )
@@ -122,17 +108,33 @@ OUTPUT: Return ONLY this JSON (no markdown, no extra text):
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
             result = json.loads(response.text)
+            
+            # Ensure optimization_goal is tagged in the result for tracking
+            result["optimization_goal"] = optimization_goal
+            
             # Validate that primary nodes are present in the output
             if not result.get("nodes") or len(result["nodes"]) < len(primary_nodes):
-                print("Gemini response missing primary nodes. Falling back.")
+                print(f"Gemini response missing primary nodes for {optimization_goal}. Falling back.")
                 return self._geometric_fallback(geometry_data)
             return result
         except Exception as e:
             import traceback
-            with open("ai_crash.log", "w") as f:
+            with open("ai_crash.log", "a") as f:
+                f.write(f"\nAPI Error during {optimization_goal} generation:\n")
                 f.write(traceback.format_exc())
-            print(f"Gemini API failed: {e}. Using geometric fallback.")
+            print(f"Gemini API failed for {optimization_goal}: {e}. Using geometric fallback.")
             return self._geometric_fallback(geometry_data)
+
+    def request_variants(self, geometry_data: dict) -> list:
+        """
+        Request 3 distinct design variants from Gemini: COST, CARBON, BALANCED.
+        """
+        variants = []
+        for goal in ["COST", "CARBON", "BALANCED"]:
+            print(f"Requesting AI Variant: {goal}...")
+            design = self.request_design(geometry_data, optimization_goal=goal)
+            variants.append(design)
+        return variants
 
     def _geometric_fallback(self, geometry_data: dict) -> dict:
         """
