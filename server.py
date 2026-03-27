@@ -65,7 +65,12 @@ def _graph_to_response(graph, fea_results, material_params, mat_type):
     nodes_out = {}
     for node_id, ndata in graph.nodes(data=True):
         coords = ndata["coords"]
-        nodes_out[str(node_id)] = {"x": coords[0], "y": coords[1], "z": coords[2]}
+        nodes_out[str(node_id)] = {
+            "x": coords[0],
+            "y": coords[1],
+            "z": coords[2],
+            "connection_type": ndata.get("connection_type", "welded")
+        }
 
     members_out = []
     total_length = 0.0
@@ -204,7 +209,7 @@ def evaluate():
             variant_results.append({
                 "graph": graph,
                 "fea": results,
-                "goal": design.get("optimization_goal", "BALANCED")
+                "goal": design.get("optimization_goal", "DISPLACEMENT")
             })
 
         # STEP 3: Build response for all 3 variants
@@ -214,9 +219,9 @@ def evaluate():
             resp["name"] = v["goal"]
             output_variants.append(resp)
 
-        # Use BALANCED as the default selection for backward compatibility
-        balanced_idx = next((i for i, v in enumerate(output_variants) if v["name"] == "BALANCED"), 0)
-        primary_variant = output_variants[balanced_idx]
+        # Use DISPLACEMENT as the default selection for backward compatibility
+        default_idx = next((i for i, v in enumerate(output_variants) if v["name"] == "DISPLACEMENT"), 0)
+        primary_variant = output_variants[default_idx]
 
         LATEST_VARIANTS.clear()
         LATEST_VARIANTS.extend(output_variants)

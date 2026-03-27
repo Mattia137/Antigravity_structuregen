@@ -82,13 +82,11 @@ TASKS:
 1. PRESERVE PRIMARY STRUCTURE: Keep all primary_nodes and primary_edges.
 2. REARRANGE & EXPAND:
    - Rearrange non-crease edges to optimize load paths.
-   - Add nodes from "internal_nodes" to create a complex internal structural network.
+   - Add nodes from "internal_nodes", move them along existing mesh edges, and connect them with new lines to create a complex internal structural network.
    - Triangulate for global stability (see "Triangulation" in research patterns).
 3. ASSIGN SECTIONS: Choose from {section_list} based on manual rules.
-4. IDENTIFY CONNECTION TYPOLOGY (MANDATORY):
-   - `welded`: High-moment primary joints (beam-to-column, primary frame nodes).
-   - `hinge`: Secondary diagonal braces and pinned lattice nodes.
-   - `steel_plate`: Secondary beam-to-column or tie-beam connections.
+4. IDENTIFY CONNECTION TYPOLOGY (MANDATORY) FOR EACH NODE:
+   - Assign `connection_type` to every node: `welded`, `hinge`, or `steel_plate` depending on the required joint strength.
 5. PLACE CONCRETE CORES (CODE COMPLIANCE): 
    - Min 1.5% GFA. 
    - Position cores at "PEAK POINTS" (Max Height) to ensure elevators reach the rooftop.
@@ -96,7 +94,7 @@ TASKS:
 
 OUTPUT: Return ONLY JSON:
 {{
-  "nodes": [{{"id": int, "x": float, "y": float, "z": float}}],
+  "nodes": [{{"id": int, "x": float, "y": float, "z": float, "connection_type": "welded|hinge|steel_plate"}}],
   "edges": [{{"source": int, "target": int, "type": "primary_crease|secondary_lattice", "section": "string", "connection": "fixed|pinned", "typology": "welded|hinge|steel_plate"}}],
   "cores": [{{"x": float, "y": float, "thickness": float, "width": float, "depth": float}}]
 }}
@@ -139,16 +137,16 @@ OUTPUT: Return ONLY JSON:
 
     def request_variants(self, geometry_data: dict) -> list:
         """
-        Request 3 distinct design variants from Gemini: COST, CARBON, BALANCED.
+        Request 3 distinct design variants from Gemini: DISPLACEMENT, COST, CARBON.
         """
         variants = []
-        for goal in ["COST", "CARBON", "BALANCED"]:
+        for goal in ["DISPLACEMENT", "COST", "CARBON"]:
             print(f"Requesting AI Variant: {goal}...")
             design = self.request_design(geometry_data, optimization_goal=goal)
             variants.append(design)
         return variants
 
-    def _geometric_fallback(self, geometry_data: dict, optimization_goal: str = "BALANCED") -> dict:
+    def _geometric_fallback(self, geometry_data: dict, optimization_goal: str = "DISPLACEMENT") -> dict:
         """
         Fallback when Gemini is unavailable.
         Assigns sections to every primary edge. Adds centroid stabilisers only
@@ -170,7 +168,7 @@ OUTPUT: Return ONLY JSON:
         if len(primary_nodes) < 2:
             return self._generic_cube_fallback()
 
-        nodes = [{"id": n["id"], "x": n["x"], "y": n["y"], "z": n["z"]} for n in primary_nodes]
+        nodes = [{"id": n["id"], "x": n["x"], "y": n["y"], "z": n["z"], "connection_type": "welded"} for n in primary_nodes]
 
         # Different default sections depending on the optimization goal
         if optimization_goal == "COST":
@@ -179,7 +177,7 @@ OUTPUT: Return ONLY JSON:
         elif optimization_goal == "CARBON":
             crease_sec = "IPE_300"
             lattice_sec = "HEA_200"
-        else: # BALANCED
+        else: # DISPLACEMENT
             crease_sec = "W14x90"
             lattice_sec = "W8x31"
 
@@ -207,7 +205,7 @@ OUTPUT: Return ONLY JSON:
                     continue
                 cx = float(arr[floor_mask, 0].mean())
                 cy = float(arr[floor_mask, 1].mean())
-                nodes.append({"id": nid, "x": cx, "y": cy, "z": float(z_level)})
+                nodes.append({"id": nid, "x": cx, "y": cy, "z": float(z_level), "connection_type": "hinge"})
                 for fid in floor_ids:
                     edges.append({
                         "source": fid, "target": nid,
@@ -228,10 +226,10 @@ OUTPUT: Return ONLY JSON:
     def _generic_cube_fallback(self) -> dict:
         """Ultra-fallback: simple 3D frame when no geometry is available."""
         nodes = [
-            {"id": 0, "x": 0, "y": 0, "z": 0}, {"id": 1, "x": 10, "y": 0, "z": 0},
-            {"id": 2, "x": 10, "y": 10, "z": 0}, {"id": 3, "x": 0, "y": 10, "z": 0},
-            {"id": 4, "x": 0, "y": 0, "z": 10}, {"id": 5, "x": 10, "y": 0, "z": 10},
-            {"id": 6, "x": 10, "y": 10, "z": 10}, {"id": 7, "x": 0, "y": 10, "z": 10},
+            {"id": 0, "x": 0, "y": 0, "z": 0, "connection_type": "welded"}, {"id": 1, "x": 10, "y": 0, "z": 0, "connection_type": "welded"},
+            {"id": 2, "x": 10, "y": 10, "z": 0, "connection_type": "welded"}, {"id": 3, "x": 0, "y": 10, "z": 0, "connection_type": "welded"},
+            {"id": 4, "x": 0, "y": 0, "z": 10, "connection_type": "welded"}, {"id": 5, "x": 10, "y": 0, "z": 10, "connection_type": "welded"},
+            {"id": 6, "x": 10, "y": 10, "z": 10, "connection_type": "welded"}, {"id": 7, "x": 0, "y": 10, "z": 10, "connection_type": "welded"},
         ]
         edges = [
             {"source": 0, "target": 4, "type": "primary_crease", "section": "W14x90", "connection": "fixed"},
@@ -256,7 +254,7 @@ OUTPUT: Return ONLY JSON:
         G = nx.Graph()
 
         for node in design_json.get("nodes", []):
-            G.add_node(node["id"], coords=(node["x"], node["y"], node["z"]))
+            G.add_node(node["id"], coords=(node["x"], node["y"], node["z"]), connection_type=node.get("connection_type", "welded"))
 
         G.add_edges_from([
             (e["source"], e["target"], {
