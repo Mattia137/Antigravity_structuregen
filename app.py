@@ -89,12 +89,16 @@ if uploaded_mesh is not None:
         with st.status("Executing AI Evolutionary Optimization...", expanded=True) as status:
             if use_remote:
                 import requests
+                import base64
                 try:
-                    # In a real scenario, we might upload the mesh here
-                    # For now, we'll send the extracted geometry
+                    # Encode the specific uploaded mesh as base64 to send to the remote brain
+                    with open(temp_path, "rb") as f:
+                        mesh_b64 = base64.b64encode(f.read()).decode('utf-8')
+
                     payload = {
                         "material": mat_type,
-                        "geometry": base_geom 
+                        "geometry": base_geom,
+                        "mesh_b64": mesh_b64
                     }
                     response = requests.post(f"{brain_url}/api/evaluate", json=payload)
                     if response.status_code == 200:
@@ -281,8 +285,7 @@ if uploaded_mesh is not None:
             # Extract displacements locally if we have active_graph
             node_disp_for_mesh = node_displacements
 
-            ge_temp = GeometryEngine.__new__(GeometryEngine)
-            solid_mesh = ge_temp.generate_solid_structure(active_graph, node_displacements=node_disp_for_mesh)
+            solid_mesh = GeometryEngine.generate_solid_structure(active_graph, node_displacements=node_disp_for_mesh)
 
             fig = go.Figure()
 
@@ -348,6 +351,18 @@ if uploaded_mesh is not None:
                     hoverinfo='none'
                 ))
             
+            # Calculate Dynamic Camera Center
+            if active_nodes:
+                xs = [n["x"] for n in active_nodes.values()]
+                ys = [n["y"] for n in active_nodes.values()]
+                zs = [n["z"] for n in active_nodes.values()]
+                center_x = (max(xs) + min(xs)) / 2
+                center_y = (max(ys) + min(ys)) / 2
+                center_z = (max(zs) + min(zs)) / 2
+                max_dim = max(max(xs)-min(xs), max(ys)-min(ys), max(zs)-min(zs))
+            else:
+                center_x, center_y, center_z, max_dim = 0, 0, 0, 10
+
             fig.update_layout(
                 paper_bgcolor='rgba(0,0,0,0)',
                 plot_bgcolor='rgba(0,0,0,0)',
@@ -356,12 +371,24 @@ if uploaded_mesh is not None:
                     xaxis=dict(showbackground=False, visible=False),
                     yaxis=dict(showbackground=False, visible=False),
                     zaxis=dict(showbackground=False, visible=False),
-                    camera=dict(projection=dict(type=projection))
+                    camera=dict(
+                        projection=dict(type=projection),
+                        eye=dict(x=1.5, y=1.5, z=1.5),
+                        center=dict(x=0, y=0, z=0),
+                        up=dict(x=0, y=0, z=1) # Z-up
+                    )
                 ),
                 margin=dict(l=0, r=0, b=0, t=0),
                 height=800
             )
             
+            # Adjust camera center and eye based on mesh bounds
+            fig.update_scenes(camera_center=dict(x=0, y=0, z=0)) 
+            # Note: since we normalized the mesh in GeometryEngine to be centered at 0,0 
+            # and min_z=0, the camera center (0,0,0) is near the base.
+            # We shift it up to the middle of the building.
+            fig.update_layout(scene_camera_center=dict(x=0, y=0, z=center_z/(max_dim if max_dim > 0 else 1)))
+
             st.plotly_chart(fig, use_container_width=True)
             
             # Auto-cleanup temp file

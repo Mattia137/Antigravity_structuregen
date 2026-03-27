@@ -144,7 +144,15 @@ def evaluate():
         }
 
         # ── STEP 1: Geometry Extraction ───────────────────────────────────────
-        ge = GeometryEngine('mass-DEF.obj')
+        mesh_path = 'mass-DEF.obj' # fallback
+        mesh_b64 = data.get('mesh_b64')
+        if mesh_b64:
+            import base64
+            mesh_path = 'temp_input.obj'
+            with open(mesh_path, 'wb') as f:
+                f.write(base64.b64decode(mesh_b64))
+        
+        ge = GeometryEngine(mesh_path)
         all_verts = np.array(ge.extract_boundary_nodes())
 
         creases = ge.extract_primary_creases(angle_threshold_degrees=5.0)
@@ -162,8 +170,7 @@ def evaluate():
 
         peak_points = ge.get_max_height_points()
 
-        print(f"Geometry: {len(primary_nodes)} nodes, {len(primary_edges)} edges "
-              f"({sum(1 for e in primary_edges if e['type']=='primary_crease')} crease)")
+        print(f"Geometry ({mesh_path}): {len(primary_nodes)} nodes, {len(primary_edges)} edges")
 
         # ── STEP 2: Mesh Descriptors + System Selection ───────────────────────
         mesh_desc = compute_mesh_descriptors(ge)

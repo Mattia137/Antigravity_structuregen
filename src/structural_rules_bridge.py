@@ -69,11 +69,7 @@ def compute_mesh_descriptors(ge) -> dict:
             extract_mesh_descriptors, select_structural_system,
         )
 
-        verts_orig = np.array(ge.mesh.vertices, dtype=float)
-        faces      = np.array(ge.mesh.faces, dtype=int)
-
-        # Swap Y↔Z so rules module sees Z as vertical
-        verts_zup = verts_orig[:, [0, 2, 1]]  # (X, Z_blender, Y_blender) → (X, Y_rules, Z_rules=height)
+        verts_zup = verts_orig  # Direct Z-up usage now
 
         creases_data = ge.extract_primary_creases(angle_threshold_degrees=5.0)
         if creases_data["edges"]:

@@ -79,23 +79,23 @@ class FEASolver:
         }
 
         # Add nodes
-        # Blender OBJ exports Y-up: Y = height (vertical), Z = depth
-        min_y = float('inf')
-        max_y = float('-inf')
+        # Normalized mesh: Z = height (vertical)
+        min_z = float('inf')
+        max_z = float('-inf')
         for node_id, data in self.graph.nodes(data=True):
             coords = data["coords"]
             self.model.add_node(str(node_id), coords[0], coords[1], coords[2])
-            if coords[1] < min_y:
-                min_y = coords[1]
-            if coords[1] > max_y:
-                max_y = coords[1]
+            if coords[2] < min_z:
+                min_z = coords[2]
+            if coords[2] > max_z:
+                max_z = coords[2]
 
-        # Fixed supports at the lowest Y level (foundation / ground floor)
-        # Use a 10% of total height tolerance to catch all ground nodes
-        y_range = (max_y - min_y) if max_y != float('-inf') else 1.0
-        tol = max(0.5, y_range * 0.05)
+        # Fixed supports at the lowest Z level (foundation / ground floor)
+        # Use a 5% of total height tolerance to catch all ground nodes
+        z_range = (max_z - min_z) if max_z != float('-inf') else 1.0
+        tol = max(0.5, z_range * 0.05)
         for node_id, data in self.graph.nodes(data=True):
-            if abs(data["coords"][1] - min_y) < tol:
+            if abs(data["coords"][2] - min_z) < tol:
                 self.model.def_support(str(node_id), True, True, True, True, True, True)
 
         # Add members
@@ -144,8 +144,8 @@ class FEASolver:
 
         rho_n = self.material.get("rho", 7850) * gravity  # N/m³
 
-        # Find min Y for seismic base shear height calculation
-        min_y_val = min((n.Y for n in self.model.nodes.values()), default=0.0)
+        # Find min Z for seismic base shear height calculation
+        min_z_val = min((n.Z for n in self.model.nodes.values()), default=0.0)
 
         # Dictionary to accumulate nodal dead loads (half of connected member weights)
         nodal_dead_loads = {node_id: 0.0 for node_id in self.model.nodes.keys()}
@@ -165,13 +165,13 @@ class FEASolver:
         for node_id, node in self.model.nodes.items():
             # Apply calculated dead load
             if nodal_dead_loads[node_id] > 0:
-                self.model.add_node_load(node_id, 'FY', -nodal_dead_loads[node_id], case='D')
+                self.model.add_node_load(node_id, 'FZ', -nodal_dead_loads[node_id], case='D')
 
-            height_above_base = node.Y - min_y_val
+            height_above_base = node.Z - min_z_val
             if height_above_base > 1.0:
                 lateral_force = 500 * height_above_base  # ELF approximation
                 self.model.add_node_load(node_id, 'FX', lateral_force, case='E')
-                self.model.add_node_load(node_id, 'FY', -2000, case='L')
+                self.model.add_node_load(node_id, 'FZ', -2000, case='L')
 
     # ------------------------------------------------------------------
     def solve_and_evaluate(self):
@@ -216,7 +216,8 @@ class FEASolver:
             L = member.L()
             limit = L / 360.0
             try:
-                max_deflection = member.max_deflection('dy', 'D+L+E')
+                # Vertical deflection check: dz in Z-up system
+                max_deflection = member.max_deflection('dz', 'D+L+E')
                 if abs(max_deflection) > limit:
                     failures.append({
                         "member": member_name,

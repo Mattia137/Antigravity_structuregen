@@ -4,18 +4,29 @@ import trimesh
 class GeometryEngine:
     def __init__(self, filepath: str):
         """
-        Ingest .obj/.stl meshes with absolute 1:1 scale fidelity.
-        Never normalize or center coordinates.
+        Ingest .obj/.stl meshes, center them at (0,0,0) and align the base to Z=0.
         """
-        # process=False ensures coordinates, normals, etc are not structurally altered/normalized
-        self.mesh = trimesh.load_mesh(filepath, process=False)
+        # process=True is now acceptable as we want to handle centering manually or via trimesh
+        self.mesh = trimesh.load_mesh(filepath)
         if isinstance(self.mesh, trimesh.Scene):
             self.mesh = self.mesh.dump(concatenate=True)
             
-        # Merge identical vertices so we can compute adjacency and angles properly
         self.mesh.merge_vertices()
+        self.normalize_mesh()
 
-        print(f"Loaded mesh {filepath} with {len(self.mesh.vertices)} vertices and {len(self.mesh.faces)} faces.")
+        print(f"Loaded and normalized mesh {filepath}: {len(self.mesh.vertices)} vertices.")
+
+    def normalize_mesh(self):
+        """
+        Center the mesh in X and Y, and move the lowest point to Z=0.
+        """
+        extents = self.mesh.bounds
+        center_xy = (extents[0][:2] + extents[1][:2]) / 2.0
+        z_min = extents[0][2]
+        
+        # Translation vector: offset to center XY and bring Z_min to 0
+        translation = np.array([-center_xy[0], -center_xy[1], -z_min])
+        self.mesh.apply_translation(translation)
 
     def extract_boundary_nodes(self):
         """
@@ -192,7 +203,8 @@ class GeometryEngine:
         print(f"Sampled {len(internal_points)} internal nodes within mesh volume.")
         return internal_points.tolist()
 
-    def generate_solid_structure(self, graph, node_displacements=None):
+    @staticmethod
+    def generate_solid_structure(graph, node_displacements=None):
         """
         Generate a solid 3D mesh (trimesh.Trimesh) by extruding cylinders 
         along each graph edge. Radius is derived from section area.
