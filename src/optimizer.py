@@ -17,7 +17,7 @@ class EvolutionaryOptimizer:
         print(f"Starting Evolutionary Optimization (Max Iterations: {max_iterations})")
         
         # We need to return exactly 3 optimized variants.
-        goals = ["COST", "CARBON", "BALANCED"]
+        goals = ["DISPLACEMENT", "COST", "CARBON"]
         final_variants = []
         
         for goal in goals:
@@ -81,13 +81,28 @@ class EvolutionaryOptimizer:
                 total_cost = (total_mass / 1833) * 145.0
 
             # Build node and member structure expected by UI variants
-            active_nodes = {str(n): {"x": coords[0], "y": coords[1], "z": coords[2]} for n, coords in latest_graph.nodes(data="coords")}
+            active_nodes = {}
+            for n, data in latest_graph.nodes(data=True):
+                coords = data["coords"]
+                active_nodes[str(n)] = {
+                    "x": coords[0],
+                    "y": coords[1],
+                    "z": coords[2],
+                    "connection_type": data.get("connection_type", "welded")
+                }
 
             active_members = []
             for u, v, m_data in latest_graph.edges(data=True):
                 disp_i = best_results["node_displacements"].get(str(u), 0.0) if best_results and "node_displacements" in best_results else 0.0
                 disp_j = best_results["node_displacements"].get(str(v), 0.0) if best_results and "node_displacements" in best_results else 0.0
-                active_members.append({"from": str(u), "to": str(v), "disp_i": disp_i, "disp_j": disp_j})
+                active_members.append({
+                    "from": str(u),
+                    "to": str(v),
+                    "disp_i": disp_i,
+                    "disp_j": disp_j,
+                    "section": m_data.get("section", "unknown"),
+                    "typology": m_data.get("typology", "unknown")
+                })
 
             final_variants.append({
                 "name": goal,
@@ -106,12 +121,12 @@ class EvolutionaryOptimizer:
             })
 
         print("Optimization Pipeline Finished.")
-        # Return the BALANCED variant as the default graph and results, but attach all variants to the graph object
+        # Return the DISPLACEMENT variant as the default graph and results, but attach all variants to the graph object
         # Alternatively, since app.py expects a graph and best_results, we can pass the final_variants list via a custom attribute
-        balanced = next((v for v in final_variants if v["name"] == "BALANCED"), final_variants[-1])
-        balanced["graph"].graph["variants"] = final_variants
+        default_variant = next((v for v in final_variants if v["name"] == "DISPLACEMENT"), final_variants[0])
+        default_variant["graph"].graph["variants"] = final_variants
 
-        return balanced["graph"], balanced["best_results"]
+        return default_variant["graph"], default_variant["best_results"]
 
 if __name__ == "__main__":
     print("Evolutionary Optimizer Ready.")
