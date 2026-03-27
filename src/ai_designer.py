@@ -42,57 +42,91 @@ class AIDesigner:
     def request_design(self, geometry_data: dict, optimization_goal: str = "BALANCED") -> dict:
         """
         Build a Gemini prompt that:
-          1. Takes mesh crease vertices as PRIMARY nodes.
+          1. Takes mesh crease vertices as PRIMARY nodes (exact coords preserved).
           2. Takes mesh crease edges as PRIMARY structural members.
-          3. Uses INTERNAL_NODES as high-density anchor points for a complex lattice.
-          4. Optimizes for the specified goal (COST, CARBON, or BALANCED).
+          3. Uses structural rules (system selection, code limits) to guide design.
+          4. Optimizes for the specified goal (DISPLACEMENT, COST, or CARBON).
         """
         primary_nodes = geometry_data.get("primary_nodes", [])
         primary_edges = geometry_data.get("primary_edges", [])
-        internal_nodes = geometry_data.get("internal_nodes", [])
         sqft_data = geometry_data.get("sqft_data", {})
         bounds = geometry_data.get("bounds", {})
         feedback = geometry_data.get("optimization_feedback", "")
+        rules_digest = geometry_data.get("rules_digest", "")
 
         section_list = STEEL_SECTIONS
 
-        system_prompt = f"""You are the Lead Computational Structural Engineer performing generative structural design.
-        
-GOAL: Optimize for {optimization_goal}
-- COST: Minimize total material weight and connection complexity.
-- CARBON: Prioritize low-carbon sections and efficient geometries.
-- BALANCED: Professional trade-off between displacement and footprint.
+        # Goal-specific instructions
+        goal_instructions = {
+            "DISPLACEMENT": (
+                "Minimize maximum nodal displacement. Prioritize stiff sections "
+                "(W14x283, W14x159, W24x146, HSS12x12x0.625). Add X-bracing in every bay. "
+                "Use fixed connections throughout. Add secondary nodes for mid-span bracing."
+            ),
+            "COST": (
+                "Minimize total steel volume. Use lightest sections that still satisfy "
+                "L/360 deflection and KL/r ≤ 200. Prefer pinned secondary connections. "
+                "Minimize secondary structure — only add bracing where strictly required."
+            ),
+            "CARBON": (
+                "Minimize embodied carbon (kg CO₂e). Prefer HSS round sections over "
+                "wide-flanges (lower carbon per kg). Use efficient triangulated topology. "
+                "Avoid redundant members. Use W8x31 / IPE_300 / HSS6x0.500 where possible."
+            ),
+            "BALANCED": (
+                "Balance displacement, cost, and carbon. Use W14x90 columns, W12x53 beams, "
+                "HSS8x8x0.500 braces as baseline. Add secondary bracing only where primary "
+                "members exceed L/360 deflection limit."
+            ),
+        }
+        goal_text = goal_instructions.get(optimization_goal, goal_instructions["BALANCED"])
+
+        system_prompt = f"""You are the Lead Computational Structural Engineer performing code-compliant generative structural design.
+
+OPTIMIZATION GOAL: {optimization_goal}
+{goal_text}
+
+{rules_digest}
 
 KNOWLEDGE BASE:
 {self.structural_manual}
 
-RESEARCH PATTERNS:
-{self.research_patterns}
-
 ---
-WORKFLOW:
-You receive:
-- "primary_nodes": coordinates of mesh vertices (EXACT).
-- "primary_edges": mesh crease lines (PRIMARY frame).
-- "internal_nodes": sampled 3D points INSIDE the volume for high-density lattice anchors.
-- "sqft_data": floor area and centroids.
-- "optimization_feedback": FEA results for iteration.
+WORKFLOW — follow in order:
 
-TASKS:
-1. PRESERVE PRIMARY STRUCTURE: Keep all primary_nodes and primary_edges.
-2. REARRANGE & EXPAND:
-   - Rearrange non-crease edges to optimize load paths.
-   - Add nodes from "internal_nodes", move them along existing mesh edges, and connect them with new lines to create a complex internal structural network.
-   - Triangulate for global stability (see "Triangulation" in research patterns).
-3. ASSIGN SECTIONS: Choose from {section_list} based on manual rules.
-4. IDENTIFY CONNECTION TYPOLOGY (MANDATORY) FOR EACH NODE:
-   - Assign `connection_type` to every node: `welded`, `hinge`, or `steel_plate` depending on the required joint strength.
-5. PLACE CONCRETE CORES (CODE COMPLIANCE): 
-   - Min 1.5% GFA. 
-   - Position cores at "PEAK POINTS" (Max Height) to ensure elevators reach the rooftop.
-   - Ensure the "SUGGESTED CORE COUNT" is met for large buildings (every floor point must be within 60m of a core).
+STEP 1 — PRESERVE PRIMARY NODES (MANDATORY):
+  Output ALL primary_nodes with their EXACT (x, y, z) coordinates — do NOT modify.
 
-OUTPUT: Return ONLY JSON:
+STEP 2 — CLASSIFY PRIMARY EDGES:
+  Output ALL primary_edges as type "primary_crease".
+  Assign section based on member geometry:
+    · Nearly vertical (height-dominant): column → W14x90 or W14x283
+    · Sloped / diagonal: arch rib → W12x53 or W18x97
+    · Nearly horizontal: beam → W12x50 or IPE_300
+    · Short tie < 3 m: W8x31 or HEA_200
+
+STEP 3 — ADD SECONDARY STRUCTURE (only where structurally required):
+  Add secondary_lattice edges to resolve:
+    · Unbraced column segments > 6 m (add mid-height lateral node)
+    · Bays > 4 m wide with no lateral bracing (add X-brace)
+    · Curved surface panels > 4 m² with no triangulation
+  Use: HSS8x8x0.500, HSS6x0.500, Tubular_HSS_4x4x1/4, HEA_200 for braces.
+  Secondary nodes start at ID = max(primary_node_id) + 1.
+
+STEP 4 — ASSIGN CONNECTION TYPES:
+  · "fixed" for: columns, beams, moment frames, arch ribs
+  · "pinned" for: bracing diagonals, secondary lattice ties
+  · "connection_type" on each node: "welded" (primary), "hinge" (brace end), "steel_plate" (transfer)
+
+STEP 5 — PLACE CONCRETE SHEAR CORES:
+  At least 1 core at building centroid (plan), sized per ACI 318-19.
+  Position at peak-height locations (y-max in coordinates).
+
+{f"PREVIOUS FEA FEEDBACK — MANDATORY FIXES: {feedback}" if feedback else ""}
+
+ALLOWED SECTIONS: {section_list}
+
+OUTPUT: Return ONLY valid JSON (no markdown, no explanation):
 {{
   "nodes": [{{"id": int, "x": float, "y": float, "z": float, "connection_type": "welded|hinge|steel_plate"}}],
   "edges": [{{"source": int, "target": int, "type": "primary_crease|secondary_lattice", "section": "string", "connection": "fixed|pinned", "typology": "welded|hinge|steel_plate"}}],
@@ -105,10 +139,9 @@ OUTPUT: Return ONLY JSON:
         user_message = (
             f"PRIMARY NODES ({len(primary_nodes)} nodes):\n{json.dumps(primary_nodes)}\n\n"
             f"PRIMARY EDGES ({len(primary_edges)} edges):\n{json.dumps(primary_edges)}\n\n"
-            f"INTERNAL NODES ({len(internal_nodes)} sample points):\n{json.dumps(internal_nodes[:100])}\n\n"
-            f"PEAK POINTS (Max Height locations): {json.dumps(peak_points)}\n"
-            f"SQFT DATA & SUGGESTED CORES: {json.dumps(sqft_data)}\n"
-            f"BOUNDS: {json.dumps(bounds)}"
+            f"PEAK POINTS (Y-max locations for core placement): {json.dumps(peak_points)}\n"
+            f"FLOOR DATA & SUGGESTED CORES: {json.dumps(sqft_data)}\n"
+            f"BOUNDS (metres): {json.dumps(bounds)}"
         )
 
         try:
@@ -135,16 +168,15 @@ OUTPUT: Return ONLY JSON:
             print(f"Gemini API failed for {optimization_goal}: {e}. Using geometric fallback.")
             return self._geometric_fallback(geometry_data, optimization_goal)
 
-    def request_variants(self, geometry_data: dict) -> list:
+    def request_base_design(self, geometry_data: dict) -> dict:
         """
-        Request 3 distinct design variants from Gemini: DISPLACEMENT, COST, CARBON.
+        Request a single BALANCED base design from Gemini.
+        The 3 optimization variants (MIN_COST, BALANCED, MIN_DISP) are then
+        produced programmatically via section scaling — no extra API calls.
+        This keeps the pipeline within the 60s proxy timeout.
         """
-        variants = []
-        for goal in ["DISPLACEMENT", "COST", "CARBON"]:
-            print(f"Requesting AI Variant: {goal}...")
-            design = self.request_design(geometry_data, optimization_goal=goal)
-            variants.append(design)
-        return variants
+        print("Requesting AI base design (BALANCED)...")
+        return self.request_design(geometry_data, optimization_goal="BALANCED")
 
     def _geometric_fallback(self, geometry_data: dict, optimization_goal: str = "DISPLACEMENT") -> dict:
         """
