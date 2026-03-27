@@ -145,12 +145,28 @@ OUTPUT: Return ONLY valid JSON (no markdown, no explanation):
         )
 
         try:
+            # Correct SDK usage: system_instruction goes in GenerateContentConfig
+            # or as a separate parameter in some versions. In google-genai 1.0.0+,
+            # it is part of the config.
             response = self.client.models.generate_content(
                 model=self.model_name,
-                contents=system_prompt + "\n\n" + user_message,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
+                contents=user_message,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    max_output_tokens=2048,
+                    temperature=0.2
+                )
             )
-            result = json.loads(response.text)
+            
+            # Robust JSON cleaning (remove triple backticks if present)
+            raw_text = response.text.strip()
+            if raw_text.startswith("```json"):
+                raw_text = raw_text[7:-3].strip()
+            elif raw_text.startswith("```"):
+                raw_text = raw_text[3:-3].strip()
+                
+            result = json.loads(raw_text)
             
             # Ensure optimization_goal is tagged in the result for tracking
             result["optimization_goal"] = optimization_goal
@@ -165,6 +181,8 @@ OUTPUT: Return ONLY valid JSON (no markdown, no explanation):
             with open("ai_crash.log", "a") as f:
                 f.write(f"\nAPI Error during {optimization_goal} generation:\n")
                 f.write(traceback.format_exc())
+                if 'response' in locals():
+                    f.write(f"Raw Response: {response.text}\n")
             print(f"Gemini API failed for {optimization_goal}: {e}. Using geometric fallback.")
             return self._geometric_fallback(geometry_data, optimization_goal)
 
