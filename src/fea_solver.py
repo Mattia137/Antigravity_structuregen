@@ -1,6 +1,5 @@
 import math
 import networkx as nx
-import numpy as np
 from Pynite import FEModel3D
 
 # Unit conversions: config.py stores sections in imperial (in², in⁴)
@@ -82,16 +81,18 @@ class FEASolver:
         # Add nodes
         # Blender OBJ exports Y-up: Y = height (vertical), Z = depth
         min_y = float('inf')
+        max_y = float('-inf')
         for node_id, data in self.graph.nodes(data=True):
             coords = data["coords"]
             self.model.add_node(str(node_id), coords[0], coords[1], coords[2])
             if coords[1] < min_y:
                 min_y = coords[1]
+            if coords[1] > max_y:
+                max_y = coords[1]
 
         # Fixed supports at the lowest Y level (foundation / ground floor)
         # Use a 10% of total height tolerance to catch all ground nodes
-        y_vals = [data["coords"][1] for _, data in self.graph.nodes(data=True)]
-        y_range = max(y_vals) - min_y if y_vals else 1.0
+        y_range = (max_y - min_y) if max_y != float('-inf') else 1.0
         tol = max(0.5, y_range * 0.05)
         for node_id, data in self.graph.nodes(data=True):
             if abs(data["coords"][1] - min_y) < tol:
@@ -133,7 +134,7 @@ class FEASolver:
     def apply_loads(self, gravity=9.81):
         """
         Load cases:
-          D  — Dead / self-weight (distributed load based on section area × density)
+          D  — Dead / self-weight (calculated structural self-weight as discrete nodal dead loads)
           L  — Live load (floor occupancy, nodal)
           E  — Lateral seismic (ELF approximation)
           D+L+E — Combined factored (1.2D + 1.0L + 1.0E)
@@ -146,16 +147,26 @@ class FEASolver:
         # Find min Y for seismic base shear height calculation
         min_y_val = min((n.Y for n in self.model.nodes.values()), default=0.0)
 
+        # Dictionary to accumulate nodal dead loads (half of connected member weights)
+        nodal_dead_loads = {node_id: 0.0 for node_id in self.model.nodes.keys()}
+
         for member_name, member in self.model.members.items():
-            area = member.section.A  # m²
-            dist_load = rho_n * area  # N/m (weight per unit length)
             try:
-                # FY = vertical axis in Blender Y-up OBJ coordinate system
-                self.model.add_member_dist_load(member_name, 'FY', -dist_load, -dist_load, 0, 100, case='D')
+                area = member.section.A  # m²
+                length = member.L()      # m
+                member_weight = rho_n * area * length  # N
+
+                # Distribute half of member weight to each connected node
+                nodal_dead_loads[member.i_node.name] += member_weight / 2.0
+                nodal_dead_loads[member.j_node.name] += member_weight / 2.0
             except Exception:
                 pass
 
         for node_id, node in self.model.nodes.items():
+            # Apply calculated dead load
+            if nodal_dead_loads[node_id] > 0:
+                self.model.add_node_load(node_id, 'FY', -nodal_dead_loads[node_id], case='D')
+
             height_above_base = node.Y - min_y_val
             if height_above_base > 1.0:
                 lateral_force = 500 * height_above_base  # ELF approximation

@@ -100,10 +100,10 @@ if uploaded_mesh is not None:
                     if response.status_code == 200:
                         data = response.json()
                         st.session_state.variants = data["variants"]
-                        # Default to balanced variant for initial display
-                        balanced_variant = next((v for v in data["variants"] if v["name"] == "BALANCED"), data["variants"][0])
+                        # Default to DISPLACEMENT variant for initial display
+                        default_variant = next((v for v in data["variants"] if v["name"] == "DISPLACEMENT"), data["variants"][0])
                         final_graph = None # Logic below will handle variants
-                        best_results = balanced_variant["metrics"]
+                        best_results = default_variant["metrics"]
                         st.success("Remote AI generation successful.")
                     else:
                         st.error(f"Remote Brain Error: {response.text}")
@@ -156,7 +156,7 @@ if uploaded_mesh is not None:
             st.header("3D Rendering")
             
             # Variant Selection (if available)
-            selected_v_name = "BALANCED" # default fallback
+            selected_v_name = "DISPLACEMENT" # default fallback
             if "variants" in st.session_state and st.session_state.variants:
                 v_names = [v["name"] for v in st.session_state.variants]
                 selected_v_name = st.radio("Select Optimization Variant", v_names, horizontal=True)
@@ -173,8 +173,25 @@ if uploaded_mesh is not None:
                 if not final_graph and "graph" in selected_variant:
                     final_graph = selected_variant["graph"]
             else:
-                active_nodes = {str(n): {"x": coords[0], "y": coords[1], "z": coords[2]} for n, coords in final_graph.nodes(data="coords")}
-                active_members = [{"from": str(u), "to": str(v), "disp_i": 0, "disp_j": 0} for u, v in final_graph.edges()]
+                active_nodes = {}
+                for n, data in final_graph.nodes(data=True):
+                    coords = data["coords"]
+                    active_nodes[str(n)] = {
+                        "x": coords[0],
+                        "y": coords[1],
+                        "z": coords[2],
+                        "connection_type": data.get("connection_type", "welded")
+                    }
+                active_members = []
+                for u, v, m_data in final_graph.edges(data=True):
+                    active_members.append({
+                        "from": str(u),
+                        "to": str(v),
+                        "disp_i": 0,
+                        "disp_j": 0,
+                        "section": m_data.get("section", "unknown"),
+                        "typology": m_data.get("typology", "unknown")
+                    })
 
             # --- RESULTS TABLE & DIAGRAM ---
             if "variants" in st.session_state and st.session_state.variants:
@@ -219,6 +236,23 @@ if uploaded_mesh is not None:
                     fig_diag.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), showlegend=True)
                     st.plotly_chart(fig_diag, use_container_width=True)
 
+                st.subheader("Variant Typology Distribution")
+                colC, colD = st.columns(2)
+
+                with colC:
+                    node_conns = [n.get("connection_type", "unknown") for n in active_nodes.values()]
+                    conn_counts = {c: node_conns.count(c) for c in set(node_conns)}
+                    fig_conn = go.Figure(data=[go.Pie(labels=list(conn_counts.keys()), values=list(conn_counts.values()), hole=.3)])
+                    fig_conn.update_layout(title="Node Connections", margin=dict(t=30, b=10, l=10, r=10))
+                    st.plotly_chart(fig_conn, use_container_width=True)
+
+                with colD:
+                    member_secs = [m.get("section", "unknown") for m in active_members]
+                    sec_counts = {s: member_secs.count(s) for s in set(member_secs)}
+                    fig_sec = go.Figure(data=[go.Pie(labels=list(sec_counts.keys()), values=list(sec_counts.values()), hole=.3)])
+                    fig_sec.update_layout(title="Member Cross-Sections", margin=dict(t=30, b=10, l=10, r=10))
+                    st.plotly_chart(fig_sec, use_container_width=True)
+
             # Build node displacements mapping if heatmap is active
             node_displacements = None
             if displacement_heatmap:
@@ -233,7 +267,7 @@ if uploaded_mesh is not None:
             # In our local run_optimization_loop, the variants are saved to final_graph.graph["variants"]
             active_graph = None
             if hasattr(final_graph, "graph") and "variants" in final_graph.graph:
-                v_selected = next(v for v in final_graph.graph["variants"] if v["name"] == (selected_v_name if "variants" in st.session_state else "BALANCED"))
+                v_selected = next(v for v in final_graph.graph["variants"] if v["name"] == (selected_v_name if "variants" in st.session_state else "DISPLACEMENT"))
                 active_graph = v_selected.get("graph")
 
             if active_graph is None:

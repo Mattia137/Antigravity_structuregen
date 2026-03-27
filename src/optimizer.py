@@ -1,117 +1,168 @@
+"""
+Evolutionary Optimizer
+======================
+Pipeline:
+  1. AI generates one BALANCED base design (single Gemini call)
+  2. PyNite FEA runs on base design
+  3. Structural rules code checks (ASCE 7-22 drift, IBC L/360, AISC KL/r≤200)
+  4. If code checks FAIL and iterations remain → targeted revision feedback to Gemini
+  5. After convergence → produce 3 variants via section scaling:
+       MIN_COST  (-2 ladder steps)
+       BALANCED  (as-is)
+       MIN_DISP  (+2 ladder steps)
+  6. Run FEA on all 3 variants; return list of {graph, fea, goal}
+"""
 import networkx as nx
+
+# Section ladder: ordered lightest → heaviest by cross-sectional area
+_STEEL_LADDER = [
+    "W8x31", "IPE_300", "HEA_200", "HSS6x0.500",
+    "W12x50", "W12x53", "Tubular_HSS_4x4x1/4",
+    "HSS8x8x0.500", "HSS10x0.500",
+    "W14x90", "W18x97", "W24x146",
+    "W14x159", "HSS12x12x0.625", "HSS16x0.625", "W14x283"
+]
+_LADDER_INDEX = {s: i for i, s in enumerate(_STEEL_LADDER)}
+
+
+def _scale_sections(graph, steps: int) -> nx.Graph:
+    """Return a copy of graph with every steel section shifted ±steps on the ladder."""
+    G = graph.copy()
+    for u, v, data in G.edges(data=True):
+        sec = data.get("section", "")
+        if sec in _LADDER_INDEX:
+            new_idx = max(0, min(len(_STEEL_LADDER) - 1, _LADDER_INDEX[sec] + steps))
+            G[u][v]["section"] = _STEEL_LADDER[new_idx]
+    return G
+
+
+def _run_fea(graph, material_params: dict) -> dict:
+    from src.fea_solver import FEASolver
+    fea = FEASolver(graph, material_params)
+    fea.build_model()
+    fea.apply_loads()
+    return fea.solve_and_evaluate()
+
 
 class EvolutionaryOptimizer:
     def __init__(self, ai_designer):
-        """
-        Initializes the optimization engine with an instance of the AI Designer.
-        """
         self.ai = ai_designer
 
-    def run_optimization_loop(self, base_geometry: dict, material_params: dict, max_iterations=3):
+    # ------------------------------------------------------------------
+    def run_optimization_loop(
+        self,
+        base_geometry: dict,
+        material_params: dict,
+        max_iterations: int = 1,
+    ) -> tuple:
         """
-        Executes the feedback loop sending FEA failing zones back to the AI.
-        Outputs exactly 3 optimized versions: Lowest Cost, Lowest Carbon Footprint, Balanced.
+        Run the generative + FEA + code-check revision pipeline.
+
+        Returns
+        -------
+        (base_graph, base_fea_results)
+        The calleruses build_three_variants() to produce cost/carbon/disp variants.
         """
-        from src.fea_solver import FEASolver
-        
-        print(f"Starting Evolutionary Optimization (Max Iterations: {max_iterations})")
-        
-        # We need to return exactly 3 optimized variants.
-        goals = ["COST", "CARBON", "BALANCED"]
-        final_variants = []
-        
-        for goal in goals:
-            current_feedback = "Initial Design Generation. Focus on baseline stability and LABC compliance."
-            latest_graph = None
-            best_results = None
-            latest_design_json = None
-            
-            for i in range(1, max_iterations + 1):
-                print(f"\n[Iteration {i}/{max_iterations}] Generating AI Design for {goal}...")
+        from src.structural_rules_bridge import run_code_checks
 
-                modified_geometry = dict(base_geometry)
-                modified_geometry["optimization_feedback"] = current_feedback
+        mesh_desc = base_geometry.get("mesh_desc", {})
+        feedback  = "Initial design. Ensure code compliance per ASCE 7-22 and AISC 360-22."
+        best_graph   = None
+        best_results = None
 
-                design_json = self.ai.request_design(modified_geometry, optimization_goal=goal)
-                struct_graph = self.ai.construct_graph(design_json)
-                latest_graph = struct_graph
-                latest_design_json = design_json
+        for iteration in range(1, max_iterations + 1):
+            print(f"\n[Iter {iteration}/{max_iterations}] Requesting AI base design...")
 
-                fea = FEASolver(struct_graph, material_params)
-                fea.build_model()
-                fea.apply_loads()
-                results = fea.solve_and_evaluate()
-                best_results = results
+            geom = dict(base_geometry)
+            geom["optimization_feedback"] = feedback
 
-                if results["status"] == "Passed":
-                    print(f"Design Passed FEA limits at iteration {i} for {goal}!")
-                    break
-                else:
-                    failures = results["failures"]
-                    print(f"Design Failed with {len(failures)} weak members.")
+            # ── 1. Gemini generates design ─────────────────────────────────
+            design_json = self.ai.request_base_design(geom)
+            graph       = self.ai.construct_graph(design_json)
+            best_graph  = graph
 
-                    fail_summary = failures[:10]
-                    current_feedback = (
-                        "FEA Analysis Failed on previous iteration.\n"
-                        f"Max Nodal Displacement: {results.get('max_displacement', 0):.4f}m.\n"
-                        f"Top Failing Members (Deflection > L/360): {fail_summary}\n"
-                        "Mandatory Command: Mutate the topology. Increase specific member profiles (cross-sections) "
-                        "or add localized cross-bracing targeting these weak topological zones to fix failures "
-                        "while strictly minimizing the overall Carbon Footprint and Material Cost."
-                    )
-            
-            # Compute heuristic metrics for the dashboard
-            total_length = 0.0
-            for u, v, data in latest_graph.edges(data=True):
-                import numpy as np
-                coord_u = np.array(latest_graph.nodes[u]["coords"])
-                coord_v = np.array(latest_graph.nodes[v]["coords"])
-                total_length += np.linalg.norm(coord_u - coord_v)
+            # ── 2. PyNite FEA ──────────────────────────────────────────────
+            fea_results  = _run_fea(graph, material_params)
+            best_results = fea_results
 
-            total_volume = total_length * 0.05
-            rho = material_params.get("rho", 7850)
-            total_mass = total_volume * rho
-            mat_type = material_params.get("type", "Steel")
-            
-            if mat_type == "Steel":
-                total_carbon = total_mass * 1.22
-                total_cost = (total_mass / 1000) * 2653.0
-            else:
-                total_carbon = total_mass * 0.20
-                total_cost = (total_mass / 1833) * 145.0
+            # ── 3. Code checks ─────────────────────────────────────────────
+            check_report = run_code_checks(fea_results, mesh_desc, graph)
+            drift_DCR    = check_report.get("drift_DCR", 0.0)
+            max_disp     = check_report.get("max_disp_m", 0.0)
+            overall      = check_report.get("overall", "unknown")
+            h_sx         = check_report.get("h_sx_m", 4.0)
 
-            # Build node and member structure expected by UI variants
-            active_nodes = {str(n): {"x": coords[0], "y": coords[1], "z": coords[2]} for n, coords in latest_graph.nodes(data="coords")}
+            print(f"  FEA: δ_max={max_disp:.4f} m | drift_DCR={drift_DCR:.3f} | checks={overall}")
 
-            active_members = []
-            for u, v, m_data in latest_graph.edges(data=True):
-                disp_i = best_results["node_displacements"].get(str(u), 0.0) if best_results and "node_displacements" in best_results else 0.0
-                disp_j = best_results["node_displacements"].get(str(v), 0.0) if best_results and "node_displacements" in best_results else 0.0
-                active_members.append({"from": str(u), "to": str(v), "disp_i": disp_i, "disp_j": disp_j})
+            if overall == "pass":
+                print(f"  ✓ All code checks PASS at iteration {iteration}.")
+                break
 
-            final_variants.append({
-                "name": goal,
-                "graph": latest_graph,
-                "design_json": latest_design_json,
-                "best_results": best_results,
-                "nodes": active_nodes,
-                "members": active_members,
-                "metrics": {
-                    "Volume": total_volume,
-                    "Mass": total_mass,
-                    "Carbon_kgCO2e": total_carbon,
-                    "Cost_USD": total_cost,
-                    "Max_Disp": best_results.get("max_displacement", 0) if best_results else 0
-                }
-            })
+            if iteration >= max_iterations:
+                print(f"  ✗ Code checks did not converge in {max_iterations} iterations.")
+                break
 
-        print("Optimization Pipeline Finished.")
-        # Return the BALANCED variant as the default graph and results, but attach all variants to the graph object
-        # Alternatively, since app.py expects a graph and best_results, we can pass the final_variants list via a custom attribute
-        balanced = next((v for v in final_variants if v["name"] == "BALANCED"), final_variants[-1])
-        balanced["graph"].graph["variants"] = final_variants
+            # ── 4. Build targeted feedback for next Gemini call ────────────
+            fea_fails = fea_results.get("failures", [])[:8]
+            check_fails = [c for c in check_report.get("checks", []) if c["status"] == "fail"]
+            drift_fail  = any("drift" in c.get("type", "") for c in check_fails)
+            slender_fail = [c for c in check_fails if "slenderness" in c.get("type", "")]
 
-        return balanced["graph"], balanced["best_results"]
+            parts = [
+                f"ITERATION {iteration} REVISION REQUIRED:",
+                f"  Max displacement = {max_disp:.4f} m (story height = {h_sx:.1f} m)",
+                f"  Drift DCR = {drift_DCR:.3f} (limit 1.0 = ASCE 7-22 §12.12-1)",
+            ]
+            if drift_fail:
+                parts.append(
+                    "  DRIFT FAILS: Add X-bracing diagonals in ALL perimeter bays. "
+                    "Upgrade ALL column sections by 2 ladder steps. "
+                    "Add secondary bracing nodes at mid-height of columns > 6 m."
+                )
+            if fea_fails:
+                member_ids = [f["member"] for f in fea_fails]
+                parts.append(
+                    f"  L/360 DEFLECTION FAILS in members {member_ids}. "
+                    "Upgrade those sections to next heavier. Add mid-span lateral nodes where L > 6 m."
+                )
+            if slender_fail:
+                parts.append(
+                    "  SLENDERNESS FAILS (KL/r > 200): Insert intermediate bracing nodes to halve those members."
+                )
+            feedback = "\n".join(parts)
+
+        print("Optimization loop complete.")
+        return best_graph, best_results
+
+    # ------------------------------------------------------------------
+    def build_three_variants(
+        self,
+        base_graph,
+        base_results: dict,
+        material_params: dict,
+    ) -> list:
+        """
+        Produce 3 variants from the converged base design via section scaling.
+        Runs FEA on MIN_COST and MIN_DISP; BALANCED reuses base_results.
+
+        Returns
+        -------
+        list of dict: [{graph, fea, goal}, ...]  in order [MIN_COST, BALANCED, MIN_DISP]
+        """
+        # MIN_COST — lighter sections (2 steps down)
+        g_cost = _scale_sections(base_graph, steps=-2)
+        r_cost = _run_fea(g_cost, material_params)
+
+        # MIN_DISP — heavier sections (2 steps up)
+        g_perf = _scale_sections(base_graph, steps=+2)
+        r_perf = _run_fea(g_perf, material_params)
+
+        return [
+            {"graph": g_cost,    "fea": r_cost,    "goal": "MIN_COST"},
+            {"graph": base_graph, "fea": base_results, "goal": "BALANCED"},
+            {"graph": g_perf,    "fea": r_perf,    "goal": "MIN_DISP"},
+        ]
+
 
 if __name__ == "__main__":
     print("Evolutionary Optimizer Ready.")
