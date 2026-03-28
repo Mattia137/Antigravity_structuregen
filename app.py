@@ -76,9 +76,22 @@ if uploaded_mesh is not None:
     if st.button("Initialize Generative Design Pipeline"):
         with st.status("Executing Phase 2: Geometry Extraction...", expanded=True) as status:
             ge = GeometryEngine(temp_path)
+            # Store normalized mesh data for Ghost Volume overlay
+            m = ge.mesh
+            st.session_state.input_mesh_data = {
+                "x": m.vertices[:, 0].tolist(),
+                "y": m.vertices[:, 1].tolist(),
+                "z": m.vertices[:, 2].tolist(),
+                "i": m.faces[:, 0].tolist(),
+                "j": m.faces[:, 1].tolist(),
+                "k": m.faces[:, 2].tolist()
+            }
+            
+            # Prepare extraction for brain
             nodes = ge.extract_boundary_nodes()
-            creases = ge.extract_primary_creases()
+            creases = ge.extract_primary_creases(angle_threshold_degrees=15.0)
             sqft_data = ge.slice_mesh_horizontally()
+            
             base_geom = {
                 "vertices": nodes,
                 "creases": creases,
@@ -287,7 +300,18 @@ if uploaded_mesh is not None:
 
             solid_mesh = GeometryEngine.generate_solid_structure(active_graph, node_displacements=node_disp_for_mesh)
 
-            fig = go.Figure()
+            # --- GHOST VOLUME OVERLAY ---
+            if 'input_mesh_data' in st.session_state:
+                m_data = st.session_state.input_mesh_data
+                fig.add_trace(go.Mesh3d(
+                    x=m_data["x"], y=m_data["y"], z=m_data["z"],
+                    i=m_data["i"], j=m_data["j"], k=m_data["k"],
+                    opacity=0.1,
+                    color='cyan',
+                    name='Input Massing',
+                    hoverinfo='none',
+                    showlegend=True
+                ))
 
             if solid_mesh and isinstance(solid_mesh, trimesh.Trimesh):
                 vertices = solid_mesh.vertices

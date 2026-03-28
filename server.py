@@ -153,24 +153,26 @@ def evaluate():
                 f.write(base64.b64decode(mesh_b64))
         
         ge = GeometryEngine(mesh_path)
-        all_verts = np.array(ge.extract_boundary_nodes())
+        
+        # Only extract CREASE nodes to keep the Gemini prompt small and accurate
+        creases = ge.extract_primary_creases(angle_threshold_degrees=15.0)
+        crease_node_indices = creases["nodes"]
+        all_verts = ge.mesh.vertices
+        
+        # Build primary nodes list (ID, X, Y, Z)
+        primary_nodes = []
+        for idx in crease_node_indices:
+            v = all_verts[idx]
+            primary_nodes.append({"id": int(idx), "x": float(v[0]), "y": float(v[1]), "z": float(v[2])})
 
-        creases = ge.extract_primary_creases(angle_threshold_degrees=5.0)
-        crease_set = set(tuple(sorted(e)) for e in creases["edges"])
-
-        primary_nodes = [
-            {"id": i, "x": float(v[0]), "y": float(v[1]), "z": float(v[2])}
-            for i, v in enumerate(all_verts)
-        ]
         primary_edges = []
-        for e in ge.mesh.edges_unique:
-            u, v_idx = int(e[0]), int(e[1])
-            etype = "primary_crease" if tuple(sorted([u, v_idx])) in crease_set else "secondary_lattice"
-            primary_edges.append({"source": u, "target": v_idx, "type": etype})
+        crease_set = set(tuple(sorted(e)) for e in creases["edges"])
+        for e in creases["edges"]:
+            primary_edges.append({"source": int(e[0]), "target": int(e[1]), "type": "primary_crease"})
 
         peak_points = ge.get_max_height_points()
 
-        print(f"Geometry ({mesh_path}): {len(primary_nodes)} nodes, {len(primary_edges)} edges")
+        print(f"Geometry ({mesh_path}): {len(primary_nodes)} structural nodes extracted.")
 
         # ── STEP 2: Mesh Descriptors + System Selection ───────────────────────
         mesh_desc = compute_mesh_descriptors(ge)

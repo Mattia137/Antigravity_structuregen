@@ -6,12 +6,13 @@ class GeometryEngine:
         """
         Ingest .obj/.stl meshes, center them at (0,0,0) and align the base to Z=0.
         """
-        # process=True is now acceptable as we want to handle centering manually or via trimesh
-        self.mesh = trimesh.load_mesh(filepath)
+        # process=False ensures raw coordinates are preserved exactly
+        self.mesh = trimesh.load_mesh(filepath, process=False)
         if isinstance(self.mesh, trimesh.Scene):
             self.mesh = self.mesh.dump(concatenate=True)
             
-        self.mesh.merge_vertices()
+        # Manually perform unique vertex identification ONLY if needed, without averaging
+        # self.mesh.merge_vertices() # Removd to avoid potential coordinate shifts
         self.normalize_mesh()
 
         print(f"Loaded and normalized mesh {filepath}: {len(self.mesh.vertices)} vertices.")
