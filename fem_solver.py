@@ -702,77 +702,80 @@ def cotangent_laplace_beltrami(
     N = len(vertices)
     M = len(faces)
 
-    ii_list, jj_list, ww_list = [], [], []
     A_mixed = np.zeros(N)
 
-    for f_idx in range(M):
-        i, j, k = faces[f_idx]
-        vi, vj, vk = vertices[i], vertices[j], vertices[k]
+    v0, v1, v2 = vertices[faces[:, 0]], vertices[faces[:, 1]], vertices[faces[:, 2]]
 
-        # Edge vectors
-        eij = vj - vi;  eik = vk - vi
-        ejk = vk - vj;  eji = vi - vj
-        eki = vi - vk;  ekj = vj - vk
+    eij = v1 - v0; eik = v2 - v0; ejk = v2 - v1
+    eji = -eij; eki = -eik; ekj = -ejk
 
-        # Face area
-        cross = np.cross(eij, eik)
-        area2 = np.linalg.norm(cross)
-        face_area = area2 / 2.0
+    # Face areas
+    cross_i = np.cross(eij, eik)
+    area2 = np.linalg.norm(cross_i, axis=1)
+    face_areas = area2 / 2.0
 
-        if face_area < 1e-15:
-            continue
+    # Mask valid faces
+    valid = face_areas > 1e-15
+    f_valid = faces[valid]
+    v0, v1, v2 = v0[valid], v1[valid], v2[valid]
+    eij, eik, ejk = eij[valid], eik[valid], ejk[valid]
+    eji, eki, ekj = eji[valid], eki[valid], ekj[valid]
+    face_areas = face_areas[valid]
+    area2 = area2[valid]
 
-        # Cotangents of each angle
-        cot_i = np.dot(eij, eik) / max(np.linalg.norm(np.cross(eij, eik)), 1e-15)
-        cot_j = np.dot(eji, ejk) / max(np.linalg.norm(np.cross(eji, ejk)), 1e-15)
-        cot_k = np.dot(eki, ekj) / max(np.linalg.norm(np.cross(eki, ekj)), 1e-15)
+    # Cotangents
+    dot_i = np.einsum('ij,ij->i', eij, eik)
+    dot_j = np.einsum('ij,ij->i', eji, ejk)
+    dot_k = np.einsum('ij,ij->i', eki, ekj)
 
-        # Clamp cotangents to avoid numerical issues
-        cot_i = max(min(cot_i, 1e6), -1e6)
-        cot_j = max(min(cot_j, 1e6), -1e6)
-        cot_k = max(min(cot_k, 1e6), -1e6)
+    cot_i = dot_i / np.maximum(area2, 1e-15)
+    cot_j = dot_j / np.maximum(area2, 1e-15)
+    cot_k = dot_k / np.maximum(area2, 1e-15)
 
-        # Cotangent weights for each edge:
-        # Edge (j,k): opposite vertex i → weight = cot_i
-        # Edge (i,k): opposite vertex j → weight = cot_j
-        # Edge (i,j): opposite vertex k → weight = cot_k
-        pairs_weights = [
-            (j, k, cot_i),
-            (i, k, cot_j),
-            (i, j, cot_k),
-        ]
+    cot_i = np.clip(cot_i, -1e6, 1e6)
+    cot_j = np.clip(cot_j, -1e6, 1e6)
+    cot_k = np.clip(cot_k, -1e6, 1e6)
 
-        for (a, b, w) in pairs_weights:
-            ii_list.extend([a, b, a, b])
-            jj_list.extend([b, a, a, b])
-            ww_list.extend([w/2, w/2, -w/2, -w/2])
+    # Sparse matrix indices and weights
+    idx_i, idx_j, idx_k = f_valid[:, 0], f_valid[:, 1], f_valid[:, 2]
 
-        # Mixed Voronoi area allocation
-        dot_i = np.dot(eij, eik)
-        dot_j = np.dot(eji, ejk)
-        dot_k = np.dot(eki, ekj)
+    ii = np.concatenate([idx_j, idx_k, idx_j, idx_k, idx_i, idx_k, idx_i, idx_k, idx_i, idx_j, idx_i, idx_j])
+    jj = np.concatenate([idx_k, idx_j, idx_j, idx_k, idx_k, idx_i, idx_i, idx_k, idx_j, idx_i, idx_i, idx_j])
+    ww = np.concatenate([
+        cot_i/2, cot_i/2, -cot_i/2, -cot_i/2,
+        cot_j/2, cot_j/2, -cot_j/2, -cot_j/2,
+        cot_k/2, cot_k/2, -cot_k/2, -cot_k/2,
+    ])
 
-        if dot_i < 0:
-            A_mixed[i] += face_area / 2.0
-            A_mixed[j] += face_area / 4.0
-            A_mixed[k] += face_area / 4.0
-        elif dot_j < 0:
-            A_mixed[j] += face_area / 2.0
-            A_mixed[i] += face_area / 4.0
-            A_mixed[k] += face_area / 4.0
-        elif dot_k < 0:
-            A_mixed[k] += face_area / 2.0
-            A_mixed[i] += face_area / 4.0
-            A_mixed[j] += face_area / 4.0
-        else:
-            # Non-obtuse → true Voronoi areas
-            A_mixed[i] += (np.dot(eij, eij) * cot_k + np.dot(eik, eik) * cot_j) / 8.0
-            A_mixed[j] += (np.dot(eji, eji) * cot_k + np.dot(ejk, ejk) * cot_i) / 8.0
-            A_mixed[k] += (np.dot(eki, eki) * cot_j + np.dot(ekj, ekj) * cot_i) / 8.0
+    L = sparse.coo_matrix((ww, (ii, jj)), shape=(N, N)).tocsc()
 
-    L = sparse.coo_matrix(
-        (ww_list, (ii_list, jj_list)), shape=(N, N),
-    ).tocsc()
+    # Mixed Voronoi areas
+    obt_i = dot_i < 0
+    obt_j = dot_j < 0
+    obt_k = dot_k < 0
+    non_obt = ~(obt_i | obt_j | obt_k)
+
+    # Obtuse i
+    np.add.at(A_mixed, idx_i[obt_i], face_areas[obt_i] / 2.0)
+    np.add.at(A_mixed, idx_j[obt_i], face_areas[obt_i] / 4.0)
+    np.add.at(A_mixed, idx_k[obt_i], face_areas[obt_i] / 4.0)
+    # Obtuse j
+    np.add.at(A_mixed, idx_j[obt_j], face_areas[obt_j] / 2.0)
+    np.add.at(A_mixed, idx_i[obt_j], face_areas[obt_j] / 4.0)
+    np.add.at(A_mixed, idx_k[obt_j], face_areas[obt_j] / 4.0)
+    # Obtuse k
+    np.add.at(A_mixed, idx_k[obt_k], face_areas[obt_k] / 2.0)
+    np.add.at(A_mixed, idx_i[obt_k], face_areas[obt_k] / 4.0)
+    np.add.at(A_mixed, idx_j[obt_k], face_areas[obt_k] / 4.0)
+
+    # Non-obtuse
+    sq_eij = np.einsum('ij,ij->i', eij, eij)
+    sq_eik = np.einsum('ij,ij->i', eik, eik)
+    sq_ejk = np.einsum('ij,ij->i', ejk, ejk)
+
+    np.add.at(A_mixed, idx_i[non_obt], (sq_eij[non_obt] * cot_k[non_obt] + sq_eik[non_obt] * cot_j[non_obt]) / 8.0)
+    np.add.at(A_mixed, idx_j[non_obt], (sq_eij[non_obt] * cot_k[non_obt] + sq_ejk[non_obt] * cot_i[non_obt]) / 8.0)
+    np.add.at(A_mixed, idx_k[non_obt], (sq_eik[non_obt] * cot_j[non_obt] + sq_ejk[non_obt] * cot_i[non_obt]) / 8.0)
 
     A_mixed = np.maximum(A_mixed, 1e-12)
     return L, A_mixed
@@ -833,16 +836,25 @@ def compute_gaussian_curvature_vertex(
 
     angle_sum = np.zeros(N)
 
-    for f_idx in range(len(faces)):
-        i, j, k = faces[f_idx]
+    idx_i, idx_j, idx_k = faces[:, 0], faces[:, 1], faces[:, 2]
+    v0, v1, v2 = vertices[idx_i], vertices[idx_j], vertices[idx_k]
 
-        for (a, b, c) in [(i, j, k), (j, k, i), (k, i, j)]:
-            ea = vertices[b] - vertices[a]
-            eb = vertices[c] - vertices[a]
-            denom = np.linalg.norm(ea) * np.linalg.norm(eb)
-            if denom > 1e-15:
-                cos_angle = np.clip(np.dot(ea, eb) / denom, -1.0, 1.0)
-                angle_sum[a] += math.acos(cos_angle)
+    for (a_idx, v_a, v_b, v_c) in [(idx_i, v0, v1, v2), (idx_j, v1, v2, v0), (idx_k, v2, v0, v1)]:
+        ea = v_b - v_a
+        eb = v_c - v_a
+
+        # Vectorized dot and norms
+        dot = np.einsum('ij,ij->i', ea, eb)
+        norm_a = np.linalg.norm(ea, axis=1)
+        norm_b = np.linalg.norm(eb, axis=1)
+
+        denom = norm_a * norm_b
+        valid = denom > 1e-15
+
+        cos_angle = np.clip(dot[valid] / denom[valid], -1.0, 1.0)
+        angles = np.arccos(cos_angle)
+
+        np.add.at(angle_sum, a_idx[valid], angles)
 
     K = (2.0 * math.pi - angle_sum) / A
     return K
@@ -908,14 +920,14 @@ def _compute_vertex_normals(
     """Area-weighted vertex normals from face normals."""
     N = len(vertices)
     normals = np.zeros((N, 3))
-    for f_idx in range(len(faces)):
-        i, j, k = faces[f_idx]
-        e1 = vertices[j] - vertices[i]
-        e2 = vertices[k] - vertices[i]
-        fn = np.cross(e1, e2)
-        normals[i] += fn
-        normals[j] += fn
-        normals[k] += fn
+
+    v0, v1, v2 = vertices[faces[:, 0]], vertices[faces[:, 1]], vertices[faces[:, 2]]
+    fn = np.cross(v1 - v0, v2 - v0)
+
+    np.add.at(normals, faces[:, 0], fn)
+    np.add.at(normals, faces[:, 1], fn)
+    np.add.at(normals, faces[:, 2], fn)
+
     norms = np.linalg.norm(normals, axis=1, keepdims=True)
     norms = np.maximum(norms, 1e-15)
     return normals / norms
