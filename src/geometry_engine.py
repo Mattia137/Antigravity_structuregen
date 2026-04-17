@@ -183,27 +183,6 @@ class GeometryEngine:
 
         return [[float(center[0]), float(center[1])] for center in core_centers]
 
-    def sample_internal_nodes(self, grid_spacing=5.0):
-        """
-        Generate a 3D grid of points within the mesh volume.
-        Used to provide Gemini with anchor points for internal structural networks.
-        """
-        bounds = self.mesh.bounds
-        x_range = np.arange(bounds[0][0], bounds[1][0], grid_spacing)
-        y_range = np.arange(bounds[0][1], bounds[1][1], grid_spacing)
-        z_range = np.arange(bounds[0][2], bounds[1][2], grid_spacing)
-        
-        # Create 3D grid
-        xv, yv, zv = np.meshgrid(x_range, y_range, z_range)
-        points = np.vstack([xv.ravel(), yv.ravel(), zv.ravel()]).T
-        
-        # Filter points that are actually inside the mesh
-        inside_mask = self.mesh.contains(points)
-        internal_points = points[inside_mask]
-        
-        print(f"Sampled {len(internal_points)} internal nodes within mesh volume.")
-        return internal_points.tolist()
-
     @staticmethod
     def generate_solid_structure(graph, node_displacements=None):
         """
