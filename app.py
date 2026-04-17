@@ -3,6 +3,9 @@ import plotly.graph_objects as go
 import numpy as np
 import time
 import os
+import socket
+from urllib.parse import urlparse
+import ipaddress
 
 from src.geometry_engine import GeometryEngine
 from src.ai_designer import AIDesigner
@@ -10,6 +13,39 @@ from src.optimizer import EvolutionaryOptimizer
 from src.fea_solver import FEASolver
 
 st.set_page_config(page_title="Generative Structural Exoskeleton", layout="wide")
+
+def is_safe_url(url):
+    """
+    Validates if the provided URL is safe to use for remote requests.
+    Restricts protocols to http/https and prevents access to private IP ranges.
+    Uses DNS resolution to verify the actual IP of the hostname.
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        # Use DNS resolution to get the IP address of the hostname
+        # This helps protect against DNS rebinding and attempts to hide private IPs behind domains.
+        try:
+            # We use getaddrinfo to handle both IPv4 and IPv6
+            for res in socket.getaddrinfo(hostname, None):
+                ip_str = res[4][0]
+                ip = ipaddress.ip_address(ip_str)
+                # If any of the resolved IPs are private/internal, reject the URL
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast:
+                    return False
+        except (socket.gaierror, ValueError):
+            # Could not resolve hostname or invalid IP format
+            return False
+
+        return True
+    except Exception:
+        return False
 
 try:
     with open("static/style.css", "r") as f:
@@ -104,28 +140,33 @@ if uploaded_mesh is not None:
                 import requests
                 import base64
                 try:
-                    # Encode the specific uploaded mesh as base64 to send to the remote brain
-                    with open(temp_path, "rb") as f:
-                        mesh_b64 = base64.b64encode(f.read()).decode('utf-8')
-
-                    payload = {
-                        "material": mat_type,
-                        "geometry": base_geom,
-                        "mesh_b64": mesh_b64
-                    }
-                    response = requests.post(f"{brain_url}/api/evaluate", json=payload)
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.session_state.variants = data["variants"]
-                        # Default to DISPLACEMENT variant for initial display
-                        default_variant = next((v for v in data["variants"] if v["name"] == "DISPLACEMENT"), data["variants"][0])
-                        final_graph = None # Logic below will handle variants
-                        best_results = default_variant["metrics"]
-                        st.success("Remote AI generation successful.")
-                    else:
-                        st.error(f"Remote Brain Error: {response.text}")
+                    if not is_safe_url(brain_url):
+                        st.error(f"Invalid or Unsafe Brain API URL: {brain_url}. Remote calls are restricted to approved domains or localhost.")
                         final_graph = None
                         best_results = None
+                    else:
+                        # Encode the specific uploaded mesh as base64 to send to the remote brain
+                        with open(temp_path, "rb") as f:
+                            mesh_b64 = base64.b64encode(f.read()).decode('utf-8')
+
+                        payload = {
+                            "material": mat_type,
+                            "geometry": base_geom,
+                            "mesh_b64": mesh_b64
+                        }
+                        response = requests.post(f"{brain_url}/api/evaluate", json=payload)
+                        if response.status_code == 200:
+                            data = response.json()
+                            st.session_state.variants = data["variants"]
+                            # Default to DISPLACEMENT variant for initial display
+                            default_variant = next((v for v in data["variants"] if v["name"] == "DISPLACEMENT"), data["variants"][0])
+                            final_graph = None # Logic below will handle variants
+                            best_results = default_variant["metrics"]
+                            st.success("Remote AI generation successful.")
+                        else:
+                            st.error(f"Remote Brain Error: {response.text}")
+                            final_graph = None
+                            best_results = None
                 except Exception as e:
                     st.error(f"Failed to connect to Remote Brain: {e}")
                     final_graph = None
@@ -294,6 +335,7 @@ if uploaded_mesh is not None:
             import trimesh
             import plotly.colors as pc
             
+            fig = go.Figure()
             solid_mesh = None
             # Extract displacements locally if we have active_graph
             node_disp_for_mesh = node_displacements
