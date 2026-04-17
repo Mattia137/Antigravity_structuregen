@@ -1036,6 +1036,7 @@ def project_points_to_mesh(
     f_v1 = vertices[faces[:, 1]]
     f_v2 = vertices[faces[:, 2]]
     face_centroids = (f_v0 + f_v1 + f_v2) / 3.0
+    default_bary = np.array([1.0/3, 1.0/3, 1.0/3])
 
     for pi in range(P):
         p = points[pi]
@@ -1048,9 +1049,9 @@ def project_points_to_mesh(
             candidates = np.argpartition(dists_to_centroids, n_candidates)[:n_candidates]
 
         best_dist = np.inf
-        best_pt = p.copy()
+        best_pt = p
         best_face = 0
-        best_bary = np.array([1.0/3, 1.0/3, 1.0/3])
+        best_bary = default_bary
 
         for fi in candidates:
             cp, bc = closest_point_on_triangle(p, f_v0[fi], f_v1[fi], f_v2[fi])
